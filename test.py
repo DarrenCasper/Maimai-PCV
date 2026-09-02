@@ -4,6 +4,28 @@ import numpy as np
 import time
 import math
 import threading
+from chart_parser import parse_chart
+
+
+def test_chart_parser():
+    """Sanity-check chart_parser.parse_chart: parse a sample chart (taps + a
+    hold) and print the resulting event list. Flip RUN_PARSER_TEST to run it."""
+    chart_text = "1,,2,,{8}1,3,5,7,,,4h[4:1],,"
+    song_bpm = 120
+    events = parse_chart(chart_text, bpm=song_bpm)
+    print(f"{len(events)} events parsed (bpm={song_bpm}):")
+    for e in events:
+        extra = f"  hold {e['duration_ms']} ms" if e["type"] == "HOLD" else ""
+        print(f"  {e['time_ms']:>6} ms   {e['type']:<4}  pos {e['pos']}{extra}")
+    return events
+
+
+RUN_PARSER_TEST = False   # True = just run the chart-parser check and exit;
+                          # False = run the normal camera app
+if RUN_PARSER_TEST:
+    test_chart_parser()
+    raise SystemExit(0)
+
 
 # --- hit zone layout ------------------------------------------------------
 FRAME_W, FRAME_H = 1280, 720
@@ -353,11 +375,14 @@ class CameraStream:
 
 
 cam = CameraStream(CAMERA_INDEX)
+print(f"Opening camera index {CAMERA_INDEX}... a window 'Hand Tracking Test' "
+      f"should appear. Press 'q' in that window to quit.")
 
 start = time.perf_counter()
 last_ts = -1
 last_frame = None
 last_seq = -1            # result_seq we last folded into the filters
+warned_no_cam = False
 
 fps = 0.0
 prev_time = time.perf_counter()
@@ -365,7 +390,12 @@ prev_time = time.perf_counter()
 while True:
     frame = cam.read()
     if frame is None:
-        time.sleep(0.001)
+        if not warned_no_cam and time.perf_counter() - start > 3.0:
+            print(f"Still no frames from camera index {CAMERA_INDEX} after 3s. "
+                  f"Is it the right index? Is Camo actually streaming? "
+                  f"Try a different CAMERA_INDEX.")
+            warned_no_cam = True
+        time.sleep(0.01)
         continue
 
     frame = cv2.flip(frame, 1)
