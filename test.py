@@ -271,7 +271,7 @@ def palm_center(hand_landmarks):
 # runs a lot faster on fewer pixels. Lower = more detections per second
 # (less gap to extrapolate across on fast moves) at a small hit to how
 # precisely each landmark is placed.
-DETECT_WIDTH = 384
+DETECT_WIDTH = 320
 
 # ---------------------------------------------------------------------------
 # LIVE_STREAM mode: detection runs asynchronously on a worker thread and
