@@ -1,20 +1,22 @@
 # Maimai-PCV
 
-Hand tracking pakai webcam yang memetakan posisi kedua telapak tangan ke papan
-sensor ala maimai, lalu membaca tap dan hold dari kepalan tangan. Tugas mata
-kuliah PCV (semester 5).
+Rhythm game ala maimai yang dimainkan pakai tangan di depan webcam. Program
+melacak posisi kedua telapak tangan di atas papan sensor virtual, membaca
+kepalan tangan sebagai "hit", lalu mencocokkannya dengan chart lagu dan memberi
+nilai PERFECT / GREAT / GOOD / MISS. Tugas mata kuliah PCV (semester 5).
 
-Idenya: arahkan kamera ke diri sendiri, lalu program menentukan posisi tiap
-tangan di atas layout maimai virtual, apakah tangan sedang mengepal, dan berapa
-lama. Untuk sekarang event-nya baru dicetak ke console — menyambungkannya ke
-chart adalah langkah berikutnya.
+## Isi repo
 
-Isi repo:
-
-- `test.py` — aplikasi utama (tracking + papan + gesture). Masih satu file.
-- `chart_parser.py` — parser chart teks jadi daftar event (tap / hold + timing).
-  Belum tersambung ke aplikasi kamera.
+- `test.py` — aplikasi utama: tracking tangan + papan + game rhythm (loop kamera).
+- `chart_parser.py` — parser satu chart teks (format simai) jadi daftar event
+  bertimestamp: tap, hold, touch, slide.
+- `maidata.py` — pembaca file `maidata.txt` (metadata lagu + chart per tingkat
+  kesulitan), memanggil `chart_parser`.
+- `rhythm.py` — `NoteManager`: memetakan posisi chart ke zona papan, memunculkan
+  not, menilai hit, menghitung skor / combo / akurasi.
+- `music.py` — skrip terpisah untuk cek sinkronisasi audio vs chart (tanpa kamera).
 - `hand_landmarker.task` — model tangan MediaPipe.
+- `levels/<judul lagu>/` — satu lagu: `track.mp3`, `maidata.txt`, `bg.jpg`, dst.
 
 ## Cara menjalankan
 
@@ -22,73 +24,80 @@ Isi repo:
 python test.py
 ```
 
-Butuh file `hand_landmarker.task` di folder yang sama (sudah ada di repo). Atur
-`CAMERA_INDEX` di bagian atas file sesuai webcam yang dipakai — saya pakai Camo
-lewat HP jadi index-nya `1`. Kalau layarnya hitam / tidak muncul, cek apakah
-Camo memang sedang streaming, atau coba `CAMERA_INDEX` lain (webcam laptop
-biasanya `0`). Window OpenCV sering muncul di belakang editor. Tekan `q` di
-window itu untuk keluar.
+Jalan langsung sebagai game: memuat chart メズマライザー (default tingkat Basic),
+memainkan lagunya, dan not-not terbang masuk ke zona-nya. Kepalkan tangan di
+zona pas lingkaran not mengecil. Tekan `q` di window untuk keluar (hasil akhir
+juga dicetak ke console).
 
-Ada flag `RUN_PARSER_TEST` di atas file: set `True` untuk cuma menjalankan cek
-`chart_parser` (print daftar event lalu keluar, tanpa buka kamera), `False`
-untuk aplikasi kamera normal.
+Pengaturan ada di blok atas `test.py`:
 
-Diuji di Python 3.14, OpenCV 5.0, MediaPipe 1.0.1, NumPy 2.5.
+| konstanta | fungsi |
+|---|---|
+| `PLAY_CHART` | `False` = mode tracking bebas, tanpa lagu / not |
+| `DIFFICULTY` | 2 Basic … 6 Re:Master |
+| `NOTE_SPEED` | kecepatan not ala maimai (4–5 santai, 6–7.5 umum) |
+| `AUDIO_OFFSET_MS` | geser timing kalau terasa kecepetan / kelambatan |
+| `CAMERA_INDEX` | index webcam (Camo biasanya `1`, webcam laptop `0`) |
+| `SHOW_TRACKING_DEBUG` | tampilkan titik mentah vs titik prediksi untuk tuning |
+| `RUN_PARSER_TEST` | `True` = cuma cek parser lalu keluar, tak buka kamera |
 
-Catatan: MediaPipe 1.x sudah menghapus API lama `mp.solutions.*`, jadi di sini
-memakai Tasks API yang baru (`HandLandmarker`, mode LIVE_STREAM).
+Skrip pendukung:
+
+```
+python maidata.py     # ringkasan semua tingkat kesulitan di satu lagu
+python music.py        # cek sinkronisasi lagu vs chart (25 detik pertama)
+python chart_parser.py # parse satu chart contoh
+python rhythm.py       # cek pemetaan posisi -> zona
+```
+
+Diuji di Python 3.14, OpenCV 5.0, MediaPipe 1.0.1, NumPy 2.5, pygame-ce 2.5.8.
+
+Catatan pemasangan: `pip install pygame` gagal di Python 3.14 (belum ada wheel,
+kompilasi dari source gagal). Pakai **`pip install pygame-ce`** — API sama,
+tinggal `import pygame`.
+
+Catatan MediaPipe: versi 1.x sudah menghapus API lama `mp.solutions.*`, jadi di
+sini memakai Tasks API baru (`HandLandmarker`, mode `LIVE_STREAM`).
 
 ## Progress sejauh ini
 
 ![Screenshot progress](docs/screenshot.png)
 
-**Papan.** 34 zona disusun seperti maimai: empat ring konsentris masing-masing
-8 zona (diberi label B / E / A / D dari dalam ke luar) plus dua zona setengah
-lingkaran di tengah (C1 kiri, C2 kanan). Ring yang berselang-seling diputar
-22.5° supaya sambungannya saling mengunci. Pencarian zona murni pakai
-perhitungan polar — radius menentukan ring, sudut menentukan slice — jadi tidak
-ada loop jarak per zona.
+**Papan.** 34 zona ala maimai: empat ring konsentris masing-masing 8 zona (label
+B / E / A / D dari dalam ke luar) plus dua zona setengah lingkaran di tengah
+(C1 kiri, C2 kanan). Ring berselang-seling diputar 22.5° supaya sambungannya
+saling mengunci. Pencarian zona murni perhitungan polar — radius memilih ring,
+sudut memilih slice. Papan digambar sekali ke template lalu di-`cv2.max` tiap
+frame (bukan ~200 panggilan gambar).
 
-**Hit scan.** Telapak tangan diperlakukan sebagai lingkaran berdiameter ~70px,
-bukan satu titik. Kalau lingkaran itu menutupi dua atau tiga zona bersebelahan,
-semuanya ikut terpicu. Ini memang disengaja supaya hit yang mepet lebih
-toleran, sama seperti mesin aslinya.
+**Tracking tangan.** Posisi telapak = rata-rata pergelangan + 4 buku jari (stabil
+saat mengepal). Pipeline: capture di thread sendiri, deteksi MediaPipe async
+(`LIVE_STREAM`), filter One-Euro per tangan. Karena deteksi cuma masuk ~25×/detik
+dengan latensi ~55–75 ms, marker diproyeksikan ke depan mengikuti kecepatan
+supaya tidak ketinggalan saat tangan bergerak cepat. Ada `DECEL_SNAP` yang
+menurunkan estimasi kecepatan dengan cepat saat tangan melambat/berbalik supaya
+marker tidak kelewatan. Titik debug (abu = mentah, hijau = prediksi) untuk
+menyetel `LATENCY_COMP` sendiri.
 
-**Gesture.** Kepalan tangan dihitung sebagai hit. Kepalan dideteksi dengan
-mengecek apakah ujung jari lebih dekat ke pergelangan dibanding buku jari
-tengahnya (mayoritas menekuk = mengepal). Menahan kepalan lalu melepasnya akan
-mencetak durasi hold dan zona tempat hold itu dimulai.
+**Deteksi kepalan.** Cek apakah mayoritas ujung jari lebih dekat ke pergelangan
+dibanding buku jari tengahnya. Kepalan = hit; kepalan lalu lepas = hold.
 
-**Feedback.** Papan digambar tiap frame; zona menyala oranye saat dilewati,
-hijau saat tangan mengepal, dan berkedip putih sebentar saat hit terdaftar.
+**Hit scan.** Telapak diperlakukan sebagai disc ~70 px, bukan titik. Kalau
+menutupi 2–3 zona bersebelahan, semuanya ikut kena — sengaja, supaya toleran.
 
-**Chart parser** (`chart_parser.py`). Membaca chart teks sederhana jadi daftar
-event bertimestamp. Format: token dipisah koma, koma kosong = slot diam, satu
-token bisa berisi beberapa not sekaligus (mis. `135` = not barengan). `{8}`
-mengganti pembagian ketukan (berapa slot per bar). Not hold ditulis `4h[4:1]` —
-posisi 4, tahan selama `multiplier × panjang-slot`. Output tiap event:
-`{time_ms, type, pos}` (plus `duration_ms` untuk HOLD). Ini masih berdiri
-sendiri; belum ada yang menampilkannya di papan atau mencocokkannya dengan hit
-dari tangan.
+**Chart parser + maidata loader.** Membaca `maidata.txt` (format simai):
+metadata `&title` / `&artist` / `&first`, dan chart `&inote_2..6` per kesulitan.
+Parser menangani: tap `1`–`8`, touch `A1`–`E8` dan `C1`/`C2`, hold `Nh[div:mult]`,
+marker `x` (EX) / `b` (break), ganti BPM `(185)` dan pembagian ketukan `{8}`
+inline, serta slide — termasuk rantai (`1-7-5-3`), slide V (`2V46`), campur
+bentuk (`6p5>7`), dan fork (`4-8*-2`). Diuji ke 5 kesulitan メズマライザー: chart
+berakhir ~154,4 s vs lagu 157 s (timing pas).
 
-**Kualitas tracking.** Landmark mentah dari MediaPipe cukup bergetar dan hanya
-masuk ~25–35 kali per detik, yang kelihatan jelek saat tangan digerakkan cepat.
-Setup saat ini:
-
-- capture jalan di thread sendiri supaya proses decode tidak menahan loop
-  tampilan
-- deteksi berjalan async; loop utama selalu mengirim frame paling baru ke
-  MediaPipe
-- posisi telapak diambil dari rata-rata pergelangan + empat buku jari (tetap
-  stabil saat tangan mengepal, tidak seperti ujung jari)
-- filter One-Euro menghaluskan tiap deteksi baru, dan di antara deteksi loop
-  melakukan ekstrapolasi mengikuti kecepatan terakhir supaya marker tetap
-  bergerak halus, bukan diam lalu melompat
-- tiap sample diberi timestamp waktu capture aslinya, jadi ekstrapolasinya
-  sekalian menutup sebagian besar latensi kamera ke layar
-
-Konstanta untuk semua penyetelan ini dikumpulkan di bagian atas file lengkap
-dengan catatannya.
+**Game rhythm.** `test.py` sekarang: memuat chart+lagu, memunculkan not sebagai
+lingkaran yang mengecil ke zona, menilai kepalan terhadap not terdekat (window
+PERFECT ±45 ms, GREAT ±90, GOOD ±140, MISS >200), HUD skor/akurasi/combo, dan
+layar hasil saat chart selesai. Posisi chart `1`–`8` dipetakan ke ring `D`,
+touch `A/B/E` ke zona senama.
 
 ## Log progres
 
@@ -100,47 +109,49 @@ Dicatat per tanggal, mengikuti commit. Entri terbaru di atas.
 
 ### 2026-09-02
 
-- _(belum di-commit)_ — `chart_parser.py`: parser chart teks (tap + hold + ganti
-  pembagian ketukan `{n}`, not hold `Nh[div:mult]`). Di `test.py` ditambah
-  `test_chart_parser()` dan flag `RUN_PARSER_TEST`, plus pesan startup dan
-  peringatan kalau kamera tidak mengirim frame. Parser belum tersambung ke
-  aplikasi kamera.
+- _(belum di-commit)_ — **game rhythm jadi**. Ditambah `maidata.py` (loader
+  simai) dan `rhythm.py` (`NoteManager`: pemetaan zona, penilaian, skor/combo).
+  `chart_parser.py` di-upgrade besar: touch note, marker x/b, `(bpm)` inline,
+  dan parsing slide yang benar (rantai, V, campur bentuk, fork). `music.py` untuk
+  tes sinkronisasi audio. `test.py` disambungkan: not terbang masuk, kepalan
+  dinilai, HUD + layar hasil, `NOTE_SPEED` ala maimai. Kerja tracking latensi:
+  ukur pipeline (~25 deteksi/detik, ~55–75 ms), setel `LATENCY_COMP` /
+  `MAX_EXTRAP_S`, tambah `DECEL_SNAP` anti-overshoot dan titik debug mentah vs
+  prediksi. Pasang `pygame-ce` (pygame biasa gagal build di Python 3.14).
+  Tambah folder `levels/メズマライザー/`.
+- `33325fa` — logika parser tambahan untuk hold.
 - `967b50a` — tambah screenshot hasil program ke `docs/screenshot.png`.
 - `0b77a8d` — mulai pakai README ini sebagai catatan progres.
 - `0f416d5` — fase 2: papan 34 zona (ring B/E/A/D + C1/C2 di tengah), hit scan
-  yang memperlakukan telapak sebagai disc (bisa memicu 2–3 zona sekaligus),
-  deteksi kepalan untuk tap, dan mekanik hold (kepalan lalu lepas, dengan
-  durasi + zona awalnya). Sudah termasuk kerja sebelum commit pertama:
-  pindah ke MediaPipe Tasks API karena Python 3.14 / MediaPipe 1.x menghapus
-  `mp.solutions`, capture di thread terpisah, deteksi async mode LIVE_STREAM,
-  smoothing One-Euro + ekstrapolasi antar-deteksi, dan kompensasi latensi
-  kamera-ke-layar.
+  disc, deteksi kepalan untuk tap, mekanik hold. Termasuk kerja sebelum commit
+  pertama: pindah ke MediaPipe Tasks API (Python 3.14 / MediaPipe 1.x menghapus
+  `mp.solutions`), capture di thread terpisah, deteksi async `LIVE_STREAM`,
+  smoothing One-Euro + ekstrapolasi antar-deteksi.
 
 ## Masalah / keterbatasan yang diketahui
 
-- Masih ada ~30–50 ms latensi pipeline yang tidak bisa dihilangkan.
-  Ekstrapolasi menutupi sebagian besar, tapi bisa kelewatan (overshoot) saat
-  arah gerak berubah tajam.
-- Deteksi kepalan masih heuristik 2D yang kasar. Bisa salah deteksi kalau
-  tangan menghadap lurus ke kamera (jari kelihatan memendek).
-- Geometri papan masih hard-coded untuk frame 1280×720 dan berpusat di tengah
-  gambar. Belum ada kalibrasi ke posisi pemain yang sebenarnya.
-- Akurasi gerak cepat pada akhirnya dibatasi oleh jumlah deteksi per detik yang
-  sanggup dilakukan mesin. `DETECT_WIDTH` sudah diturunkan ke 384 untuk
-  menambah jumlahnya.
-- Output baru berupa print di console — belum ada integrasi ke game/tombol.
-- Chart parser dan tracking masih terpisah. Chart juga pakai posisi `1`–`8`,
-  sedangkan papan sekarang punya 34 zona — perlu pemetaan (kemungkinan `1`–`8`
-  ke ring `A`).
+- **Latensi tracking.** Deteksi tangan cuma ~25×/detik dengan latensi ~55–75 ms
+  (batas MediaPipe di CPU). Proyeksi ke depan menutupi sebagian besar, tapi ada
+  trade-off: kompensasi penuh bikin marker kelewatan saat berhenti mendadak.
+  `DECEL_SNAP` meredam ini; tuning halus lewat titik debug.
+- **Timing game belum dikalibrasi.** `AUDIO_OFFSET_MS = 0`. Perlu disetel per
+  setup (latensi kamera + audio + reaksi).
+- Hold dan slide dinilai sebagai satu tap di titik/waktu awalnya — belum ada
+  penilaian lepas-hold atau jalur slide.
+- Ring `1`–`8` dipetakan ke wedge luar `D` yang tipis — target kecil. Kalau susah,
+  ganti `RING_TO_ZONE` di `rhythm.py` ke ring `A`.
+- Deteksi kepalan masih heuristik 2D — bisa salah kalau tangan menghadap lurus
+  ke kamera.
+- Geometri papan hard-coded untuk frame 1280×720, berpusat di tengah. Belum ada
+  kalibrasi ke posisi pemain.
+- `test.py` sudah besar dan jalan otomatis saat di-import — perlu dibungkus
+  `if __name__ == "__main__"` sebelum dipecah jadi modul.
+- `__pycache__/` masih ikut ke-track git; perlu `.gitignore`.
 
 ## Selanjutnya
 
-- Sambungkan `chart_parser` ke aplikasi kamera: jalankan waktu lagu, munculkan
-  not di zona yang tepat, lalu cocokkan HIT dari tangan dengan not yang diharap
-  (judge PERFECT / GOOD / MISS)
-- Petakan posisi chart `1`–`8` ke id zona papan
-- Ubah event HIT / RELEASE jadi input sungguhan (keypress) kalau mau dipakai ke
-  game lain
-- Bentuk kalibrasi papan, bukan layout tetap
-- Tinjau ulang heuristik kepalan, mungkin pakai model gesture yang proper
-- Pecah `test.py` jadi beberapa modul setelah bentuknya sudah mapan
+- Kalibrasi `AUDIO_OFFSET_MS` + kalibrasi papan ke posisi pemain
+- Penilaian hold (lepas di waktu yang benar) dan slide (susuri jalur)
+- Layar pemilihan lagu / kesulitan, bukan konstanta
+- Tinjau ulang heuristik kepalan, mungkin model gesture proper
+- `.gitignore` + pecah `test.py` jadi modul

@@ -4,19 +4,31 @@ import numpy as np
 import time
 import math
 import threading
+from pathlib import Path
+
+import pygame
+
 from chart_parser import parse_chart
+from maidata import get_events, load_maidata
+from rhythm import NoteManager
 
 
 def test_chart_parser():
-    """Sanity-check chart_parser.parse_chart: parse a sample chart (taps + a
-    hold) and print the resulting event list. Flip RUN_PARSER_TEST to run it."""
-    chart_text = "1,,2,,{8}1,3,5,7,,,4h[4:1],,"
+    """Sanity-check chart_parser.parse_chart: parse a sample chart mixing ring
+    taps/holds, touch notes and slides, and print the event list. Flip
+    RUN_PARSER_TEST."""
+    chart_text = "1,,A1,,{8}1-3[4:1],,C1h[4:1],,,4h[4:1],,1/4>6[8:3],"
     song_bpm = 120
     events = parse_chart(chart_text, bpm=song_bpm)
     print(f"{len(events)} events parsed (bpm={song_bpm}):")
     for e in events:
-        extra = f"  hold {e['duration_ms']} ms" if e["type"] == "HOLD" else ""
-        print(f"  {e['time_ms']:>6} ms   {e['type']:<4}  pos {e['pos']}{extra}")
+        if e["type"] == "SLIDE":
+            what = f"{e['start']} {e['shape']} {e['end']}  ({e['duration_ms']} ms)"
+        elif "duration_ms" in e:
+            what = f"pos {e['pos']}  hold {e['duration_ms']} ms"
+        else:
+            what = f"pos {e['pos']}"
+        print(f"  {e['time_ms']:>6} ms   {e['type']:<10}  {what}")
     return events
 
 
@@ -46,6 +58,18 @@ C_RADIUS = 40
 # scanning for hits. Bigger = more forgiving; it's fine (intended) for the
 # disc to straddle 2-3 zones and register all of them at once.
 PALM_HIT_RADIUS = 70
+
+# --- rhythm game -------------------------------------------------------------
+PLAY_CHART = True            # False = free-play tracking, no song / notes
+LEVEL_NAME = "メズマライザー"
+DIFFICULTY = 2               # 2 Basic 3 Advanced 4 Expert 5 Master 6 Re:Master
+AUDIO_OFFSET_MS = 0          # +ve = notes judged later; tune by ear
+
+# maimai-style note speed. Higher = notes travel faster / spend less time on
+# screen. ~4-5 is relaxed, 6.0-7.5 is what most maimai players use. This only
+# changes how early a note appears, never the timing windows.
+NOTE_SPEED = 5.0
+NOTE_LEAD_MS = int(3600 / NOTE_SPEED)   # ~720ms at 5.0, ~576ms at 6.25
 
 
 def zone_containing(px, py):
@@ -154,6 +178,37 @@ def fill_zone(img, zone_id, color):
         poly = _wedge_polygon(layer["r_min"], layer["r_max"], start, start + 45)
         cv2.fillPoly(img, [poly], color)
 
+
+def zone_center(zone_id):
+    """Pixel centre of a zone — where its incoming note marker sits."""
+    if zone_id in ("C1", "C2"):
+        return (CENTER[0] + (-20 if zone_id == "C1" else 20), CENTER[1])
+    label, idx = zone_id[0], int(zone_id[1:]) - 1
+    layer = next(l for l in RING_LAYERS if l["label"] == label)
+    mid_r = (layer["r_min"] + layer["r_max"]) / 2
+    ang = math.radians(layer["angle_offset"] + idx * 45 + 22.5)
+    return (int(CENTER[0] + mid_r * math.cos(ang)),
+            int(CENTER[1] + mid_r * math.sin(ang)))
+
+
+NOTE_COLORS = {
+    "TAP": (0, 200, 255), "HOLD": (0, 200, 255),
+    "TOUCH": (255, 150, 0), "TOUCH_HOLD": (255, 150, 0),
+    "SLIDE": (255, 60, 210),
+}
+
+
+def draw_notes(frame, notes):
+    """Incoming notes as approach circles that shrink onto their zone."""
+    for n in notes:
+        cx, cy = zone_center(n["zone"])
+        p = n["progress"]
+        col = NOTE_COLORS.get(n["kind"], (255, 255, 255))
+        cv2.circle(frame, (cx, cy), int(30 + 95 * (1 - p)), col, 2, cv2.LINE_AA)
+        if p > 0.82:  # about to be due — solid target
+            cv2.circle(frame, (cx, cy), 26, col, -1 if p > 0.96 else 2, cv2.LINE_AA)
+
+
 # mediapipe 1.x removed the legacy `mp.solutions.*` API.
 # Hand tracking now goes through the Tasks API (HandLandmarker).
 BaseOptions = mp.tasks.BaseOptions
@@ -167,25 +222,31 @@ VisionRunningMode = mp.tasks.vision.RunningMode
 PALM_IDS = [0, 5, 9, 13, 17]
 
 # --- smoothing / prediction ---------------------------------------------------
-# One-Euro filter: smooths hard when the hand is slow (kills jitter) and
-# opens right up when the hand is fast (near pass-through, almost no lag).
+# Measured on this machine: ~25 hand detections/sec, ~55ms mean (75ms p90)
+# capture->result latency. So the marker is drawn from data 2-3 frames old;
+# the fix is to project it forward along the hand's velocity.
+#
 #   MIN_CUTOFF up   -> less lag everywhere, but trembles at rest come back
 #   BETA       up   -> opens the filter sooner as the hand speeds up
-#                      (this is THE knob for "keep up with fast moves")
-#   D_CUTOFF   up   -> velocity estimate reacts faster, so BETA kicks in
-#                      immediately on a flick instead of a few frames late
+#   D_CUTOFF   up   -> velocity estimate reacts faster (but noisier, and the
+#                      projection multiplies that noise into the position)
 MIN_CUTOFF = 1.0
 BETA = 9.0
-D_CUTOFF = 10.0
+D_CUTOFF = 8.0
+DECEL_SNAP = 5.0      # how much faster the velocity estimate drops vs rises
 
-# How much of the measured capture->display latency to cancel by projecting
-# the palm forward along its velocity. 1.0 = dot sits at the hand's true
-# *current* position (best for fast tracking, can overshoot on sharp
-# reversals); 0.0 = dot lags by the full pipeline latency but never
-# overshoots. PREDICT_S adds a fixed extra lead on top.
-LATENCY_COMP = 0.7
+# How much of the (capture -> now) gap to cancel by projecting the palm along
+# its velocity. 1.0 = aim the marker at the hand's true *current* position
+# (tightest on fast moves, but can fling past when you stop suddenly). Lower
+# it toward 0.5 if the marker overshoots; raise toward 1.0 if it still lags.
+# Watch the grey debug dot (raw) vs the green one (projected) to tune.
+LATENCY_COMP = 0.85
 PREDICT_S = 0.0
-MAX_EXTRAP_S = 0.06   # never extrapolate further than this (hitch guard)
+MAX_EXTRAP_S = 0.09   # cap the projection window (~ the p90 pipeline latency)
+
+# Debug: also draw the raw (unprojected) detection as a small grey dot, so you
+# can see how much lead the prediction is adding and whether it overshoots.
+SHOW_TRACKING_DEBUG = True
 
 
 class OneEuroFilter:
@@ -221,7 +282,12 @@ class OneEuroFilter:
             dt = 1e-3
 
         dx = (x - self._x_raw_prev) / dt
-        a_d = self._alpha(self.d_cutoff, dt)
+        speeding_up = abs(dx) >= abs(self.dx_hat) and dx * self.dx_hat >= 0.0
+        # Ramp the velocity estimate UP smoothly (noise control) but let it
+        # fall FAST when the hand slows or reverses — that's what stops the
+        # projected marker from flying past the target when you stop.
+        d_cut = self.d_cutoff if speeding_up else self.d_cutoff * DECEL_SNAP
+        a_d = self._alpha(d_cut, dt)
         self.dx_hat = a_d * dx + (1.0 - a_d) * self.dx_hat
 
         cutoff = self.min_cutoff + self.beta * abs(self.dx_hat)
@@ -378,6 +444,36 @@ cam = CameraStream(CAMERA_INDEX)
 print(f"Opening camera index {CAMERA_INDEX}... a window 'Hand Tracking Test' "
       f"should appear. Press 'q' in that window to quit.")
 
+# --- load the chart + song, if playing --------------------------------------
+note_mgr = None
+song_playing = False
+song_start_perf = 0.0
+if PLAY_CHART:
+    level = Path(__file__).parent / "levels" / LEVEL_NAME
+    fields = load_maidata(level / "maidata.txt")
+    note_mgr = NoteManager(get_events(fields, DIFFICULTY), lead_ms=NOTE_LEAD_MS)
+    pygame.mixer.init()
+    pygame.mixer.music.load(str(level / "track.mp3"))
+    print(f"chart: {fields.get('title')} [slot {DIFFICULTY}] — {note_mgr.total} notes")
+    pygame.mixer.music.play()
+    song_start_perf = time.perf_counter()
+    song_playing = True
+
+
+def song_ms_now():
+    """Audio position in ms (with offset), or None if not playing.
+
+    pygame's get_pos() returns -1 once the track finishes; fall back to a
+    wall clock so the last notes still resolve and the results screen shows.
+    """
+    if not song_playing:
+        return None
+    pos = pygame.mixer.music.get_pos()
+    if pos < 0:
+        pos = int((time.perf_counter() - song_start_perf) * 1000)
+    return pos + AUDIO_OFFSET_MS
+
+
 start = time.perf_counter()
 last_ts = -1
 last_frame = None
@@ -421,6 +517,11 @@ while True:
     # --- draw the hit zones ---------------------------------------------
     stamp_board(frame)
 
+    # --- advance the chart, draw incoming notes ------------------------
+    song_ms = song_ms_now()
+    if note_mgr is not None and song_ms is not None:
+        draw_notes(frame, note_mgr.update(song_ms))
+
     # --- process the most recent result we have -------------------------
     result = latest_result
     now = time.perf_counter()
@@ -446,6 +547,7 @@ while True:
                 state["fx"].update(cx, sample_t)
                 state["fy"].update(cy, sample_t)
                 state["fist"] = is_fist(hand_landmarks)
+                state["raw_xy"] = (cx, cy)
 
             fx = state["fx"].predict(now)
             fy = state["fy"].predict(now)
@@ -463,18 +565,20 @@ while True:
 
             if fist and not state["was_fist"]:
                 if hit_zones:
-                    print(f"HIT {sorted(hit_zones)} ({label})")
                     state["flash_zones"] = set(hit_zones)
                     state["flash_until"] = now + 0.15
                     state["hold_start"] = now
                     state["hold_zones"] = set(hit_zones)
-                else:
-                    print(f"FIST outside board ({label})")
+                    if note_mgr is not None and song_ms is not None:
+                        note_mgr.judge(hit_zones, song_ms)
+                    else:
+                        print(f"HIT {sorted(hit_zones)} ({label})")
 
             elif not fist and state["was_fist"] and state["hold_start"] is not None:
-                duration = now - state["hold_start"]
-                print(f"RELEASE after {duration:.2f}s in "
-                      f"{sorted(state['hold_zones'])} ({label})")
+                if note_mgr is None:
+                    duration = now - state["hold_start"]
+                    print(f"RELEASE after {duration:.2f}s in "
+                          f"{sorted(state['hold_zones'])} ({label})")
                 state["hold_start"] = None
 
             state["was_fist"] = fist
@@ -492,13 +596,18 @@ while True:
                 for z, c in fill_ids.items():
                     fill_zone(overlay, z, c)
 
-            hands_to_draw.append((px, py, fist, label))
+            raw = state.get("raw_xy")
+            raw_px = (int(raw[0] * w), int(raw[1] * h)) if raw else None
+            hands_to_draw.append((px, py, fist, label, raw_px))
 
     # one blend for every highlight this frame, then draw the palm markers
     if overlay is not None:
         cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
 
-    for px, py, fist, label in hands_to_draw:
+    for px, py, fist, label, raw_px in hands_to_draw:
+        if SHOW_TRACKING_DEBUG and raw_px is not None:
+            cv2.circle(frame, raw_px, 5, (150, 150, 150), -1)      # raw detection
+            cv2.line(frame, raw_px, (px, py), (150, 150, 150), 1)  # lead vector
         color = (0, 0, 255) if fist else (0, 255, 0)
         cv2.circle(frame, (px, py), PALM_HIT_RADIUS, color, 1)
         cv2.circle(frame, (px, py), 8, color, -1)
@@ -514,9 +623,57 @@ while True:
     cv2.putText(frame, f"FPS: {fps:.1f}", (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
 
+    # --- rhythm-game HUD ------------------------------------------------
+    if note_mgr is not None:
+        FONT = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(frame, f"SCORE {note_mgr.score}", (w - 260, 40),
+                    FONT, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, f"ACC {note_mgr.accuracy() * 100:5.1f}%", (w - 260, 70),
+                    FONT, 0.6, (200, 200, 200), 1, cv2.LINE_AA)
+        if note_mgr.combo >= 3:
+            txt = f"{note_mgr.combo} COMBO"
+            (tw, _), _ = cv2.getTextSize(txt, FONT, 1.0, 2)
+            cv2.putText(frame, txt, (w // 2 - tw // 2, 90), FONT, 1.0,
+                        (0, 255, 255), 2, cv2.LINE_AA)
+
+        if note_mgr.last_judgment and song_ms is not None:
+            j, at = note_mgr.last_judgment
+            if 0 <= song_ms - at < 550:
+                jc = {"PERFECT": (0, 255, 120), "GREAT": (0, 220, 255),
+                      "GOOD": (0, 160, 255), "MISS": (60, 60, 255)}[j]
+                (tw, _), _ = cv2.getTextSize(j, FONT, 1.3, 3)
+                cv2.putText(frame, j, (w // 2 - tw // 2, h // 2 - 110),
+                            FONT, 1.3, jc, 3, cv2.LINE_AA)
+
+        if note_mgr.finished:
+            c = note_mgr.counts
+            lines = [
+                "RESULTS",
+                f"Perfect {c['PERFECT']}   Great {c['GREAT']}",
+                f"Good {c['GOOD']}   Miss {c['MISS']}",
+                f"Max combo {note_mgr.max_combo}",
+                f"Score {note_mgr.score}   Acc {note_mgr.accuracy() * 100:.2f}%",
+                "press q to quit",
+            ]
+            box = frame.copy()
+            cv2.rectangle(box, (w // 2 - 240, h // 2 - 130),
+                          (w // 2 + 240, h // 2 + 130), (0, 0, 0), -1)
+            cv2.addWeighted(box, 0.6, frame, 0.4, 0, frame)
+            for k, line in enumerate(lines):
+                cv2.putText(frame, line, (w // 2 - 220, h // 2 - 95 + k * 38),
+                            FONT, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
     cv2.imshow("Hand Tracking Test", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
+
+if note_mgr is not None:
+    c = note_mgr.counts
+    print(f"\nfinal: score {note_mgr.score}  acc {note_mgr.accuracy() * 100:.2f}%  "
+          f"max combo {note_mgr.max_combo}")
+    print(f"  P {c['PERFECT']}  Gr {c['GREAT']}  Gd {c['GOOD']}  M {c['MISS']}"
+          f"  (of {note_mgr.total})")
+    pygame.mixer.music.stop()
 
 landmarker.close()
 cam.release()
