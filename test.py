@@ -1,5 +1,4 @@
 import cv2
-import mediapipe as mp
 import numpy as np
 import time
 import math
@@ -9,6 +8,7 @@ from pathlib import Path
 import pygame
 
 from chart_parser import parse_chart
+from hand_tracking import detect_hands
 from maidata import get_events, load_maidata
 from rhythm import NoteManager
 
@@ -209,22 +209,14 @@ def draw_notes(frame, notes):
             cv2.circle(frame, (cx, cy), 26, col, -1 if p > 0.96 else 2, cv2.LINE_AA)
 
 
-# mediapipe 1.x removed the legacy `mp.solutions.*` API.
-# Hand tracking now goes through the Tasks API (HandLandmarker).
-BaseOptions = mp.tasks.BaseOptions
-HandLandmarker = mp.tasks.vision.HandLandmarker
-HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-VisionRunningMode = mp.tasks.vision.RunningMode
-
-# The "hit button" is the middle of the palm, not a fingertip — it stays put
-# while the hand clenches into a fist. Average these landmarks to get it:
-# wrist + the 4 finger knuckles (MCPs).
-PALM_IDS = [0, 5, 9, 13, 17]
-
 # --- smoothing / prediction ---------------------------------------------------
-# Measured on this machine: ~25 hand detections/sec, ~55ms mean (75ms p90)
-# capture->result latency. So the marker is drawn from data 2-3 frames old;
-# the fix is to project it forward along the hand's velocity.
+# Hand detection (hand_tracking.detect_hands) runs synchronously in the main
+# loop now, right before this frame is drawn — no separate detector thread
+# and no capture->result lag to hide. The One-Euro filter is still worth
+# keeping though: HSV blob centroids are noisier frame-to-frame than
+# landmark positions were, so this smooths that jitter. LATENCY_COMP /
+# MAX_EXTRAP_S below are mostly inert now (the gap they'd project across is
+# ~0), left in case a slow camera thread ever reintroduces real lag.
 #
 #   MIN_CUTOFF up   -> less lag everywhere, but trembles at rest come back
 #   BETA       up   -> opens the filter sooner as the hand speeds up
@@ -322,76 +314,14 @@ def get_hand_state(label):
     return hand_state[label]
 
 
-def is_fist(hand_landmarks):
-    """True when a majority of fingers are curled toward the wrist.
-
-    hand_landmarks is the Tasks-API list of 21 NormalizedLandmark objects
-    (indexed directly, unlike the old `.landmark[i]` API).
-    """
-    wrist = hand_landmarks[0]
-
-    finger_tips = [8, 12, 16, 20]   # index, middle, ring, pinky tips
-    finger_pips = [6, 10, 14, 18]   # their corresponding middle knuckles
-
-    curled_count = 0
-    for tip_id, pip_id in zip(finger_tips, finger_pips):
-        tip = hand_landmarks[tip_id]
-        pip = hand_landmarks[pip_id]
-
-        dist_tip = math.hypot(tip.x - wrist.x, tip.y - wrist.y)
-        dist_pip = math.hypot(pip.x - wrist.x, pip.y - wrist.y)
-
-        if dist_tip < dist_pip:
-            curled_count += 1
-
-    return curled_count >= 3  # majority curled = call it a fist
-
-
-def palm_center(hand_landmarks):
-    """Normalized (x, y) of the palm middle, averaged over PALM_IDS."""
-    xs = sum(hand_landmarks[i].x for i in PALM_IDS) / len(PALM_IDS)
-    ys = sum(hand_landmarks[i].y for i in PALM_IDS) / len(PALM_IDS)
-    return xs, ys
-
-
-# Feed MediaPipe a smaller image than we display. Landmarks are normalized
-# (0..1) so they map straight back onto the full-res frame, and the model
-# runs a lot faster on fewer pixels. Lower = more detections per second
-# (less gap to extrapolate across on fast moves) at a small hit to how
-# precisely each landmark is placed.
+# Hand detection runs on a smaller image than we display: the HSV mask and
+# contour search are cheaper on fewer pixels, and detect_hands() already
+# returns normalized (0..1) coordinates so they map straight back onto the
+# full-res frame regardless of this size. Lower = faster, at some cost to
+# how precisely the blob centroid lands.
 DETECT_WIDTH = 320
 
-# ---------------------------------------------------------------------------
-# LIVE_STREAM mode: detection runs asynchronously on a worker thread and
-# results arrive via this callback. The main loop never blocks on inference,
-# so display FPS is limited only by the camera, not by the model.
-# ---------------------------------------------------------------------------
-latest_result = None
-latest_result_ts = 0
-result_seq = 0            # bumped on every callback, so the loop can tell
-                          # a genuinely new detection from a reused one
-
-
-def on_result(result, output_image, timestamp_ms):
-    global latest_result, latest_result_ts, result_seq
-    latest_result = result
-    latest_result_ts = timestamp_ms
-    result_seq += 1
-
-
-options = HandLandmarkerOptions(
-    base_options=BaseOptions(model_asset_path="hand_landmarker.task"),
-    running_mode=VisionRunningMode.LIVE_STREAM,
-    num_hands=2,
-    min_hand_detection_confidence=0.6,
-    # lower -> MediaPipe stays in cheap frame-to-frame tracking longer and
-    # re-runs the expensive palm detector less often -> lower average latency
-    min_tracking_confidence=0.5,
-    result_callback=on_result,
-)
-landmarker = HandLandmarker.create_from_options(options)
-
-CAMERA_INDEX = 1  # whatever index Camo landed on for you
+CAMERA_INDEX = 0  # whatever index Camo landed on for you
 
 # Motion blur is the other half of fast-tracking accuracy: a blurred hand
 # gives the model a fuzzy, mis-placed landmark. Force a short exposure so
@@ -409,14 +339,18 @@ class CameraStream:
     """
 
     def __init__(self, index):
-        self.cap = cv2.VideoCapture(index, cv2.CAP_MSMF)
+        # CAP_V4L2 — CAP_MSMF is Windows-only (Media Foundation) and silently
+        # fails to open anything on Linux, regardless of index.
+        self.cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         self.cap.set(cv2.CAP_PROP_FPS, 60)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if MANUAL_EXPOSURE is not None:
-            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # 0.25 = manual (MSMF)
+            # V4L2's auto-exposure convention: 1 = manual, 3 = aperture-priority
+            # (auto). MSMF's 0.25/0.75 scale below doesn't apply here.
+            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
             self.cap.set(cv2.CAP_PROP_EXPOSURE, MANUAL_EXPOSURE)
         self.frame = None
         self.running = True
@@ -475,9 +409,8 @@ def song_ms_now():
 
 
 start = time.perf_counter()
-last_ts = -1
 last_frame = None
-last_seq = -1            # result_seq we last folded into the filters
+latest_hands = []        # detect_hands() output, held between camera frames
 warned_no_cam = False
 
 fps = 0.0
@@ -497,22 +430,16 @@ while True:
     frame = cv2.flip(frame, 1)
     h, w, _ = frame.shape
 
-    # --- hand off every *new* camera frame to the async detector ----------
-    # MediaPipe's LIVE_STREAM graph keeps only one frame in flight and drops
-    # the rest, so submitting eagerly just means it always works on the
-    # freshest frame -> lowest possible hand-tracking latency.
+    # --- detect hands on every *new* camera frame ------------------------
+    # HSV threshold + contour search is cheap, so it runs synchronously
+    # right here instead of on a worker thread. Skipping it when the
+    # display loop outpaces the camera (same frame reused) just avoids
+    # redoing identical work.
     is_new = frame is not last_frame
     last_frame = frame
     if is_new:
         small = cv2.resize(frame, (DETECT_WIDTH, int(h * DETECT_WIDTH / w)))
-        rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_small)
-
-        ts = int((time.perf_counter() - start) * 1000)
-        if ts <= last_ts:
-            ts = last_ts + 1
-        last_ts = ts
-        landmarker.detect_async(mp_image, ts)
+        latest_hands = detect_hands(small)
 
     # --- draw the hit zones ---------------------------------------------
     stamp_board(frame)
@@ -522,83 +449,74 @@ while True:
     if note_mgr is not None and song_ms is not None:
         draw_notes(frame, note_mgr.update(song_ms))
 
-    # --- process the most recent result we have -------------------------
-    result = latest_result
+    # --- process the most recent detection we have -----------------------
     now = time.perf_counter()
-    fresh = result_seq != last_seq          # a detection we haven't folded in yet
-    last_seq = result_seq
-    # perf_counter time the freshly-arrived frame was actually captured
-    sample_t = start + latest_result_ts / 1000.0
 
     hands_to_draw = []       # (px, py, fist, label) collected in pass 1
     overlay = None           # lazily-copied layer for all zone fills
 
-    if result and result.hand_landmarks:
-        for i, hand_landmarks in enumerate(result.hand_landmarks):
-            # handedness is flipped because we mirrored the frame above
-            raw = result.handedness[i][0].category_name
-            label = "Left" if raw == "Right" else "Right"
-            state = get_hand_state(label)
+    for hand in latest_hands:
+        label = hand["label"]
+        state = get_hand_state(label)
 
-            # fold a new detection into the filters ONCE; on reused results
-            # just keep extrapolating from what we already have
-            if fresh:
-                cx, cy = palm_center(hand_landmarks)
-                state["fx"].update(cx, sample_t)
-                state["fy"].update(cy, sample_t)
-                state["fist"] = is_fist(hand_landmarks)
-                state["raw_xy"] = (cx, cy)
+        # fold a new detection into the filters ONCE; on reused results
+        # just keep extrapolating from what we already have
+        if is_new:
+            state["fx"].update(hand["cx"], now)
+            state["fy"].update(hand["cy"], now)
+            state["fist"] = hand["fist"]
+            state["raw_xy"] = (hand["cx"], hand["cy"])
 
-            fx = state["fx"].predict(now)
-            fy = state["fy"].predict(now)
-            if fx is None:
-                continue
+        fx = state["fx"].predict(now)
+        fy = state["fy"].predict(now)
+        if fx is None:
+            continue
 
-            px = int(min(max(fx, 0.0), 1.0) * w)
-            py = int(min(max(fy, 0.0), 1.0) * h)
+        px = int(min(max(fx, 0.0), 1.0) * w)
+        py = int(min(max(fy, 0.0), 1.0) * h)
 
-            fist = state.get("fist", False)
+        fist = state.get("fist", False)
 
-            # the smoothed palm disc is the hit button — it can cover
-            # several zones at once and every one of them counts
-            hit_zones = zones_touching(px, py)
+        # the smoothed palm disc is the hit button — it can cover
+        # several zones at once and every one of them counts
+        hit_zones = zones_touching(px, py)
 
-            if fist and not state["was_fist"]:
-                if hit_zones:
-                    state["flash_zones"] = set(hit_zones)
-                    state["flash_until"] = now + 0.15
-                    state["hold_start"] = now
-                    state["hold_zones"] = set(hit_zones)
-                    if note_mgr is not None and song_ms is not None:
-                        note_mgr.judge(hit_zones, song_ms)
-                    else:
-                        print(f"HIT {sorted(hit_zones)} ({label})")
+        if fist and not state["was_fist"]:
+            if hit_zones:
+                state["flash_zones"] = set(hit_zones)
+                state["flash_until"] = now + 0.15
+                state["hold_start"] = now
+                state["hold_zones"] = set(hit_zones)
+                if note_mgr is not None and song_ms is not None:
+                    note_mgr.judge(hit_zones, song_ms)
+                else:
+                    print(f"HIT {sorted(hit_zones)} ({label})")
 
-            elif not fist and state["was_fist"] and state["hold_start"] is not None:
-                if note_mgr is None:
-                    duration = now - state["hold_start"]
-                    print(f"RELEASE after {duration:.2f}s in "
-                          f"{sorted(state['hold_zones'])} ({label})")
-                state["hold_start"] = None
+        elif not fist and state["was_fist"] and state["hold_start"] is not None:
+            if note_mgr is None:
+                duration = now - state["hold_start"]
+                print(f"RELEASE after {duration:.2f}s in "
+                      f"{sorted(state['hold_zones'])} ({label})")
+            state["hold_start"] = None
 
-            state["was_fist"] = fist
+        state["was_fist"] = fist
 
-            # stage zone fills onto one shared overlay (blended once, below):
-            # green while clenched, orange on hover, white flash after a hit
-            zone_color = (0, 255, 0) if fist else (0, 180, 255)
-            fill_ids = {z: zone_color for z in hit_zones}
-            if now < state["flash_until"]:
-                for z in state["flash_zones"]:
-                    fill_ids[z] = (255, 255, 255)
-            if fill_ids:
-                if overlay is None:
-                    overlay = frame.copy()
-                for z, c in fill_ids.items():
-                    fill_zone(overlay, z, c)
+        # stage zone fills onto one shared overlay (blended once, below):
+        # green while clenched, orange on hover, white flash after a hit
+        zone_color = (0, 255, 0) if fist else (0, 180, 255)
+        fill_ids = {z: zone_color for z in hit_zones}
+        if now < state["flash_until"]:
+            for z in state["flash_zones"]:
+                fill_ids[z] = (255, 255, 255)
+        if fill_ids:
+            if overlay is None:
+                overlay = frame.copy()
+            for z, c in fill_ids.items():
+                fill_zone(overlay, z, c)
 
-            raw = state.get("raw_xy")
-            raw_px = (int(raw[0] * w), int(raw[1] * h)) if raw else None
-            hands_to_draw.append((px, py, fist, label, raw_px))
+        raw = state.get("raw_xy")
+        raw_px = (int(raw[0] * w), int(raw[1] * h)) if raw else None
+        hands_to_draw.append((px, py, fist, label, raw_px))
 
     # one blend for every highlight this frame, then draw the palm markers
     if overlay is not None:
@@ -675,6 +593,5 @@ if note_mgr is not None:
           f"  (of {note_mgr.total})")
     pygame.mixer.music.stop()
 
-landmarker.close()
 cam.release()
 cv2.destroyAllWindows()

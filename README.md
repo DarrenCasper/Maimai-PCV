@@ -15,7 +15,10 @@ nilai PERFECT / GREAT / GOOD / MISS. Tugas mata kuliah PCV (semester 5).
 - `rhythm.py` — `NoteManager`: memetakan posisi chart ke zona papan, memunculkan
   not, menilai hit, menghitung skor / combo / akurasi.
 - `music.py` — skrip terpisah untuk cek sinkronisasi audio vs chart (tanpa kamera).
-- `hand_landmarker.task` — model tangan MediaPipe.
+- `hand_tracking.py` — deteksi tangan berbasis HSV + contour (tanpa MediaPipe):
+  mask warna kulit/glove, centroid contour jadi posisi telapak, solidity
+  contour jadi deteksi kepalan.
+- `calibrate_hsv.py` — alat bantu cari rentang HSV yang pas (trackbar live).
 - `levels/<judul lagu>/` — satu lagu: `track.mp3`, `maidata.txt`, `bg.jpg`, dst.
 
 ## Cara menjalankan
@@ -44,20 +47,24 @@ Pengaturan ada di blok atas `test.py`:
 Skrip pendukung:
 
 ```
-python maidata.py     # ringkasan semua tingkat kesulitan di satu lagu
-python music.py        # cek sinkronisasi lagu vs chart (25 detik pertama)
-python chart_parser.py # parse satu chart contoh
-python rhythm.py       # cek pemetaan posisi -> zona
+python maidata.py       # ringkasan semua tingkat kesulitan di satu lagu
+python music.py         # cek sinkronisasi lagu vs chart (25 detik pertama)
+python chart_parser.py  # parse satu chart contoh
+python rhythm.py        # cek pemetaan posisi -> zona
+python calibrate_hsv.py # cari rentang HSV yang pas buat kulit/glove-mu
 ```
 
-Diuji di Python 3.14, OpenCV 5.0, MediaPipe 1.0.1, NumPy 2.5, pygame-ce 2.5.8.
+Diuji di Python 3.14, OpenCV 5.0, NumPy 2.5, pygame-ce 2.5.8.
 
 Catatan pemasangan: `pip install pygame` gagal di Python 3.14 (belum ada wheel,
 kompilasi dari source gagal). Pakai **`pip install pygame-ce`** — API sama,
 tinggal `import pygame`.
 
-Catatan MediaPipe: versi 1.x sudah menghapus API lama `mp.solutions.*`, jadi di
-sini memakai Tasks API baru (`HandLandmarker`, mode `LIVE_STREAM`).
+Catatan tracking: deteksi tangan **tidak** pakai MediaPipe atau model apa pun
+— murni threshold HSV + geometri (lihat bagian "Tracking tangan" di bawah).
+Rentang HSV bawaan di `hand_tracking.py` cuma titik awal; jalankan
+`calibrate_hsv.py` untuk menyetelnya ke kulit/pencahayaan/kamera-mu sendiri
+sebelum main.
 
 ## Progress sejauh ini
 
@@ -70,17 +77,25 @@ saling mengunci. Pencarian zona murni perhitungan polar — radius memilih ring,
 sudut memilih slice. Papan digambar sekali ke template lalu di-`cv2.max` tiap
 frame (bukan ~200 panggilan gambar).
 
-**Tracking tangan.** Posisi telapak = rata-rata pergelangan + 4 buku jari (stabil
-saat mengepal). Pipeline: capture di thread sendiri, deteksi MediaPipe async
-(`LIVE_STREAM`), filter One-Euro per tangan. Karena deteksi cuma masuk ~25×/detik
-dengan latensi ~55–75 ms, marker diproyeksikan ke depan mengikuti kecepatan
-supaya tidak ketinggalan saat tangan bergerak cepat. Ada `DECEL_SNAP` yang
-menurunkan estimasi kecepatan dengan cepat saat tangan melambat/berbalik supaya
-marker tidak kelewatan. Titik debug (abu = mentah, hijau = prediksi) untuk
-menyetel `LATENCY_COMP` sendiri.
+**Tracking tangan.** Tanpa MediaPipe atau model apa pun — `hand_tracking.py`
+threshold frame ke HSV (kulit, atau nanti warna glove per tangan), bersihkan
+mask-nya (morphology open+close), lalu ambil hingga 2 contour terbesar sebagai
+tangan. Posisi telapak = centroid contour (image moments), dinormalisasi 0..1
+sama seperti landmark dulu. Karena tak ada label handedness dari model, tiap
+tangan tetap dilabeli "Left"/"Right" yang sama selama frame-ke-frame dengan
+mencocokkan ke centroid terdekat sebelumnya; tangan baru dilabeli dari posisi
+kiri-ke-kanan di layar. Pipeline: capture di thread sendiri, deteksi HSV
+sinkron tiap frame kamera baru (murah, tak perlu thread/async terpisah), filter
+One-Euro per tangan meredam jitter centroid (blob HSV lebih berisik
+dibanding landmark dulu). Titik debug (abu = mentah, hijau = smoothed) tetap
+ada untuk tuning `LATENCY_COMP`, walau sekarang efeknya kecil karena tak ada
+lagi jeda capture->hasil yang perlu dikompensasi.
 
-**Deteksi kepalan.** Cek apakah mayoritas ujung jari lebih dekat ke pergelangan
-dibanding buku jari tengahnya. Kepalan = hit; kepalan lalu lepas = hold.
+**Deteksi kepalan.** Murni geometri contour: solidity = luas contour dibagi
+luas convex hull-nya. Kepalan hampir konveks sempurna (solidity tinggi);
+telapak terbuka punya celah antar-jari yang menurunkan solidity. Di atas
+`FIST_SOLIDITY` (default 0.88) dihitung kepalan. Kepalan = hit; kepalan lalu
+lepas = hold.
 
 **Hit scan.** Telapak diperlakukan sebagai disc ~70 px, bukan titik. Kalau
 menutupi 2–3 zona bersebelahan, semuanya ikut kena — sengaja, supaya toleran.
@@ -107,6 +122,18 @@ Dicatat per tanggal, mengikuti commit. Entri terbaru di atas.
      `hash-pendek` — ringkasan singkat apa yang berubah.
      Kalau tanggalnya baru, buat sub-judul ### tanggal baru di paling atas. -->
 
+### 2026-09-15
+
+- _(belum di-commit)_ — **lepas MediaPipe sepenuhnya**. Tracking tangan sekarang
+  murni HSV + geometri OpenCV: `hand_tracking.py` (baru) threshold HSV ->
+  contour terbesar -> centroid jadi posisi telapak, solidity contour (luas
+  contour / luas convex hull) jadi deteksi kepalan. Deteksi jalan sinkron tiap
+  frame kamera baru (bukan lagi thread + `LIVE_STREAM` async terpisah).
+  Tambah `calibrate_hsv.py` buat nyari rentang HSV yang pas via trackbar live.
+  `hand_landmarker.task` dan import `mediapipe` di `test.py` dihapus. Sudah
+  disiapkan `GLOVE_HSV` di `hand_tracking.py` sebagai placeholder mode glove
+  warna (per-tangan) buat nanti.
+
 ### 2026-09-02
 
 - _(belum di-commit)_ — **game rhythm jadi**. Ditambah `maidata.py` (loader
@@ -130,18 +157,22 @@ Dicatat per tanggal, mengikuti commit. Entri terbaru di atas.
 
 ## Masalah / keterbatasan yang diketahui
 
-- **Latensi tracking.** Deteksi tangan cuma ~25×/detik dengan latensi ~55–75 ms
-  (batas MediaPipe di CPU). Proyeksi ke depan menutupi sebagian besar, tapi ada
-  trade-off: kompensasi penuh bikin marker kelewatan saat berhenti mendadak.
-  `DECEL_SNAP` meredam ini; tuning halus lewat titik debug.
+- **Tracking HSV rentan pencahayaan/latar.** Mask warna kulit gampang meleset
+  kalau lampu berubah atau ada benda sewarna kulit di latar belakang — kalibrasi
+  ulang tiap sesi lewat `calibrate_hsv.py`. Rencana: pindah ke glove/marker warna
+  solid (`GLOVE_HSV` di `hand_tracking.py` sudah ada placeholder-nya) begitu
+  barangnya ada, karena satu warna solid jauh lebih stabil di-threshold
+  dibanding kulit dan sekalian menyelesaikan handedness secara pasti.
 - **Timing game belum dikalibrasi.** `AUDIO_OFFSET_MS = 0`. Perlu disetel per
   setup (latensi kamera + audio + reaksi).
 - Hold dan slide dinilai sebagai satu tap di titik/waktu awalnya — belum ada
   penilaian lepas-hold atau jalur slide.
 - Ring `1`–`8` dipetakan ke wedge luar `D` yang tipis — target kecil. Kalau susah,
   ganti `RING_TO_ZONE` di `rhythm.py` ke ring `A`.
-- Deteksi kepalan masih heuristik 2D — bisa salah kalau tangan menghadap lurus
-  ke kamera.
+- Deteksi kepalan (solidity contour) bisa salah kalau tangan menghadap miring
+  ke kamera atau mask HSV terpotong sebagian (lengan panjang, bayangan, dll).
+- Tanpa handedness dari model, label "Left"/"Right" murni tebakan posisi +
+  kontinuitas — bisa tertukar kalau dua tangan saling menyilang cepat.
 - Geometri papan hard-coded untuk frame 1280×720, berpusat di tengah. Belum ada
   kalibrasi ke posisi pemain.
 - `test.py` sudah besar dan jalan otomatis saat di-import — perlu dibungkus
@@ -153,5 +184,6 @@ Dicatat per tanggal, mengikuti commit. Entri terbaru di atas.
 - Kalibrasi `AUDIO_OFFSET_MS` + kalibrasi papan ke posisi pemain
 - Penilaian hold (lepas di waktu yang benar) dan slide (susuri jalur)
 - Layar pemilihan lagu / kesulitan, bukan konstanta
-- Tinjau ulang heuristik kepalan, mungkin model gesture proper
+- Isi `GLOVE_HSV` begitu glove/marker warna sudah ada, pindah `TRACK_MODE`
+  ke `"glove"` untuk tracking yang lebih stabil + handedness pasti
 - `.gitignore` + pecah `test.py` jadi modul
