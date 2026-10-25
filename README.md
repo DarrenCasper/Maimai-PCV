@@ -1,189 +1,189 @@
 # Maimai-PCV
 
-Rhythm game ala maimai yang dimainkan pakai tangan di depan webcam. Program
-melacak posisi kedua telapak tangan di atas papan sensor virtual, membaca
-kepalan tangan sebagai "hit", lalu mencocokkannya dengan chart lagu dan memberi
-nilai PERFECT / GREAT / GOOD / MISS. Tugas mata kuliah PCV (semester 5).
+Game mirip maimai yang dimainkan pakai sarung tangan berwarna di depan kamera.
+Program mencari sarung tangan lewat warnanya (HSV) lalu menggambar kotak di
+sekelilingnya. Kalau kotak itu menyentuh lingkaran not pada waktu yang pas, not
+dihitung PERFECT. Kalau tidak, MISS. Tugas mata kuliah PCV semester 5.
+
+## Hasil
+
+![Hasil bermain](docs/result.png)
+
+Ini hasil main tingkat Master (561 not): skor 54.700, akurasi 97,5 persen,
+547 PERFECT, 14 MISS, max combo 129. Kotak hijau adalah sarung tangan yang
+terdeteksi. Kotak kecil di kiri bawah adalah gambar kamera. Delapan lingkaran di
+ring paling luar adalah tombol jalur tempat not mendarat. Skor dan combo ada di
+kanan atas, FPS ada di kanan bawah (sekitar 135).
+
+## Cara kerja
+
+Tiap putaran loop di `test.py` mengerjakan enam hal ini:
+
+```
+1. ambil frame terbaru dari kamera
+2. cari sarung tangan di frame        -> daftar kotak (boxes)
+3. baca posisi lagu sekarang (ms)
+4. update not, lalu cek kotak vs lingkaran not
+5. gambar papan, not, kotak, dan HUD
+6. tampilkan ke layar
+```
+
+### Kamera
+
+Kamera HP dikirim ke komputer lewat scrcpy dan muncul sebagai `/dev/video0`.
+`CameraStream` membaca kamera di thread sendiri dan hanya menyimpan frame yang
+paling baru, jadi kamera yang lambat tidak membuat gambar game patah patah. Frame
+dipotong jadi 1280x720 (`fit_cover`) lalu dibalik kiri kanan supaya seperti cermin.
+
+### Mencari sarung tangan (`hand_tracking.py`)
+
+Tidak ada MediaPipe dan tidak ada model. Semuanya dari warna, lewat enam langkah:
+
+1. Frame diperkecil jadi lebar 320 supaya cepat. Caranya `INTER_AREA`, yang
+   meratakan warna piksel di sekitarnya, jadi noise kamera berkurang.
+2. Frame diubah dari BGR ke HSV. HSV memisahkan warna dari terang gelap, jadi lebih
+   tahan kalau cahaya berubah.
+3. Untuk tiap warna sarung tangan (biru muda dan oranye) dibuat mask dengan
+   `cv2.inRange`. Hasilnya gambar hitam putih, putih artinya warnanya cocok. Titik
+   kecil yang berserakan dibuang dengan `MORPH_OPEN`.
+4. Warna putih hanya dihitung kalau menempel dekat biru atau oranye, jadi tembok
+   putih di belakang tidak ikut.
+5. Semua mask digabung, lalu celah kecil di antara warna ditutup dengan
+   `MORPH_CLOSE` supaya satu sarung tangan jadi satu bentuk (blob).
+6. Blob dicari dengan `cv2.findContours`, lalu dibuat kotaknya (`boundingRect`).
+   Blob hanya dianggap sarung tangan kalau di dalamnya ada biru **dan** oranye.
+   Panel biru atau pintu oranye di kamar tidak punya dua warna itu, jadi tidak lolos.
+
+Kotaknya lalu dikalikan lagi ke ukuran asli (1280x720) dan ditambah sedikit
+padding. Kelas `GloveTracker` menyimpan kotak terakhir selama 0,15 detik kalau
+sarung tangan hilang sebentar, supaya kotak tidak berkedip. Rentang warna diukur
+dari foto sarung tanganku. Kalau cahaya berubah, jalankan `calibrate_hsv.py` lagi.
+
+### Chart, not, dan penilaian (`chart_parser.py`, `maidata.py`, `rhythm.py`)
+
+Chart ditulis dalam format simai (teks dipisah koma, tiap koma satu slot waktu).
+`maidata.py` membaca `maidata.txt`, `chart_parser.py` mengubah teksnya jadi daftar
+event (tap, hold, touch, slide) lengkap dengan waktunya dalam milidetik.
+`NoteManager` di `rhythm.py` mengubah tiap event jadi satu not: zona mana, posisi
+pikselnya, kapan harus disentuh, dan (untuk slide) jalur yang dilewati.
+
+Jalur 1 sampai 8 di chart ditaruh di ring luar seperti maimai asli, jalur 1 di
+kanan atas lalu berputar searah jarum jam. Tiap frame ada dua langkah:
+
+1. `update(song_ms)` memberi MISS pada not yang jendela waktunya sudah lewat, lalu
+   menghitung `progress` (0 sampai 1) tiap not yang sedang tampil.
+2. `judge(boxes, song_ms)` memberi PERFECT pada not yang kotak sarung tangannya
+   menyentuh lingkaran target selama jendela waktunya (plus minus 200 ms).
+
+Cek sentuh (`box_hits_circle`): cari titik di dalam kotak yang paling dekat dengan
+pusat lingkaran, lalu lihat apakah jaraknya tidak lebih dari jari jari lingkaran.
+Tidak ada GREAT atau GOOD. Hasilnya hanya PERFECT (100 poin) atau MISS (0 poin).
+
+Waktu not selalu dihitung dari jam lagu (`pygame.mixer.music.get_pos`), bukan dari
+jam kamera, jadi not tetap sinkron dengan musik.
+
+### Gambar (`render.py`, `board.py`)
+
+`board.py` berisi ukuran papan: empat ring (B, E, A, D), tiap ring punya 8 irisan,
+ditambah lingkaran tengah (C). Titik tengah tiap zona dihitung dari radius tengah
+ring dan sudutnya (`zone_center`). Papan digambar satu kali di awal, lalu tiap
+frame tinggal ditempel ke layar.
+
+Not tap dan hold mulai kecil di tengah papan lalu terbang ke tombol jalurnya sambil
+membesar. Not touch diam di zonanya dan cincinnya mengecil. Slide berbentuk bintang
+biru: bintang terbang ke jalur awal, lalu bergerak sepanjang garis jalur sampai
+jalur akhir. Slide dinilai di jalur akhir saat bintang tiba. Latar diambil dari
+`bg.jpg` lagu yang digelapkan.
 
 ## Isi repo
 
-- `test.py` — aplikasi utama: tracking tangan + papan + game rhythm (loop kamera).
-- `chart_parser.py` — parser satu chart teks (format simai) jadi daftar event
-  bertimestamp: tap, hold, touch, slide.
-- `maidata.py` — pembaca file `maidata.txt` (metadata lagu + chart per tingkat
-  kesulitan), memanggil `chart_parser`.
-- `rhythm.py` — `NoteManager`: memetakan posisi chart ke zona papan, memunculkan
-  not, menilai hit, menghitung skor / combo / akurasi.
-- `music.py` — skrip terpisah untuk cek sinkronisasi audio vs chart (tanpa kamera).
-- `hand_tracking.py` — deteksi tangan berbasis HSV + contour (tanpa MediaPipe):
-  mask warna kulit/glove, centroid contour jadi posisi telapak, solidity
-  contour jadi deteksi kepalan.
-- `calibrate_hsv.py` — alat bantu cari rentang HSV yang pas (trackbar live).
-- `levels/<judul lagu>/` — satu lagu: `track.mp3`, `maidata.txt`, `bg.jpg`, dst.
+| file | isinya |
+|---|---|
+| `test.py` | program utama: loop kamera, cari sarung tangan, gambar, nilai |
+| `hand_tracking.py` | mencari sarung tangan lewat warna HSV, hasilnya kotak |
+| `rhythm.py` | `NoteManager`: bikin not dari chart, menilai, hitung skor dan combo |
+| `render.py` | semua gambar: papan, not, bintang slide, kotak, preview kamera, HUD |
+| `board.py` | ukuran papan dan posisi zona (hitungan saja, tanpa menggambar) |
+| `chart_parser.py` | mengubah teks chart simai jadi daftar event |
+| `maidata.py` | membaca `maidata.txt` (judul lagu dan chart tiap tingkat) |
+| `calibrate_hsv.py` | alat mencari rentang HSV satu warna dengan slider |
+| `music.py` | tes sinkron lagu dan chart tanpa kamera |
+| `levels/<judul lagu>/` | satu lagu: `track.mp3`, `maidata.txt`, `bg.jpg`, dan lainnya |
+| `docs/` | gambar untuk README |
 
 ## Cara menjalankan
 
+Sekali saja, kalau `.venv` belum ada:
+
 ```
-python test.py
+python3 -m venv .venv
+.venv/bin/pip install numpy opencv-python pygame-ce
 ```
 
-Jalan langsung sebagai game: memuat chart メズマライザー (default tingkat Basic),
-memainkan lagunya, dan not-not terbang masuk ke zona-nya. Kepalkan tangan di
-zona pas lingkaran not mengecil. Tekan `q` di window untuk keluar (hasil akhir
-juga dicetak ke console).
+Setiap kali main:
 
-Pengaturan ada di blok atas `test.py`:
+```
+cd "/run/media/darrencasper/New Volume/Semester_5_Kuliah/Maimai-PCV"
+source .venv/bin/activate
+python3 test.py
+```
 
-| konstanta | fungsi |
+Jalankan scrcpy dulu supaya kamera HP muncul di `/dev/video0`:
+
+```
+scrcpy --video-source=camera --camera-id=0 --camera-size=1280x720 --camera-fps=30 --v4l2-sink=/dev/video0 --no-audio
+```
+
+HP ini juga bisa 120 fps. Tambahkan `--camera-high-speed --camera-fps=120` untuk
+mencobanya. Kalau gambarnya miring, tambahkan `--capture-orientation=90`. Gambar
+harus landscape, karena gambar portrait akan terpotong tipis. Tekan `q` di window
+untuk keluar, hasil akhir juga dicetak di terminal.
+
+Setelan ada di bagian atas `test.py`:
+
+| konstanta | fungsinya |
 |---|---|
-| `PLAY_CHART` | `False` = mode tracking bebas, tanpa lagu / not |
-| `DIFFICULTY` | 2 Basic … 6 Re:Master |
-| `NOTE_SPEED` | kecepatan not ala maimai (4–5 santai, 6–7.5 umum) |
-| `AUDIO_OFFSET_MS` | geser timing kalau terasa kecepetan / kelambatan |
-| `CAMERA_INDEX` | index webcam (Camo biasanya `1`, webcam laptop `0`) |
-| `SHOW_TRACKING_DEBUG` | tampilkan titik mentah vs titik prediksi untuk tuning |
-| `RUN_PARSER_TEST` | `True` = cuma cek parser lalu keluar, tak buka kamera |
+| `PLAY_CHART` | `False` untuk mode tes sarung tangan saja, tanpa lagu dan not |
+| `DIFFICULTY` | 2 Basic, 3 Advanced, 4 Expert, 5 Master, 6 Re:Master |
+| `NOTE_SPEED` | kecepatan not, 4 sampai 5 santai, 6 sampai 7,5 umum dipakai |
+| `AUDIO_OFFSET_MS` | geser timing kalau not terasa terlalu cepat atau lambat |
+| `CAMERA_INDEX` | nomor kamera, 0 artinya `/dev/video0` (keluaran scrcpy) |
+| `RUN_PARSER_TEST` | `True` hanya mengecek parser lalu keluar, kamera tidak dibuka |
 
-Skrip pendukung:
+Setelan lain yang sering diubah: `BLUE`, `ORANGE`, `WHITE`, `HOLD_SECONDS` di
+`hand_tracking.py`, `HIT_WINDOW_MS` di `rhythm.py`, dan `TARGET_RADIUS` di `board.py`.
+
+Skrip bantu:
 
 ```
-python maidata.py       # ringkasan semua tingkat kesulitan di satu lagu
-python music.py         # cek sinkronisasi lagu vs chart (25 detik pertama)
-python chart_parser.py  # parse satu chart contoh
-python rhythm.py        # cek pemetaan posisi -> zona
-python calibrate_hsv.py # cari rentang HSV yang pas buat kulit/glove-mu
+python3 calibrate_hsv.py   # cari rentang HSV satu warna sarung tangan
+python3 maidata.py         # ringkasan semua tingkat kesulitan satu lagu
+python3 music.py           # cek lagu dan chart sinkron (25 detik pertama)
+python3 chart_parser.py    # parse satu chart contoh
+python3 rhythm.py          # jumlah not per zona
 ```
 
-Diuji di Python 3.14, OpenCV 5.0, NumPy 2.5, pygame-ce 2.5.8.
+Diuji di Python 3.14, OpenCV 5.0, NumPy 2.5, pygame-ce 2.5.8. `pip install pygame`
+gagal di Python 3.14 karena belum ada wheel, jadi pakai `pygame-ce`. Cara
+`import`-nya tetap `import pygame`.
 
-Catatan pemasangan: `pip install pygame` gagal di Python 3.14 (belum ada wheel,
-kompilasi dari source gagal). Pakai **`pip install pygame-ce`** — API sama,
-tinggal `import pygame`.
+## Masalah yang masih ada
 
-Catatan tracking: deteksi tangan **tidak** pakai MediaPipe atau model apa pun
-— murni threshold HSV + geometri (lihat bagian "Tracking tangan" di bawah).
-Rentang HSV bawaan di `hand_tracking.py` cuma titik awal; jalankan
-`calibrate_hsv.py` untuk menyetelnya ke kulit/pencahayaan/kamera-mu sendiri
-sebelum main.
-
-## Progress sejauh ini
-
-![Screenshot progress](docs/screenshot.png)
-
-**Papan.** 34 zona ala maimai: empat ring konsentris masing-masing 8 zona (label
-B / E / A / D dari dalam ke luar) plus dua zona setengah lingkaran di tengah
-(C1 kiri, C2 kanan). Ring berselang-seling diputar 22.5° supaya sambungannya
-saling mengunci. Pencarian zona murni perhitungan polar — radius memilih ring,
-sudut memilih slice. Papan digambar sekali ke template lalu di-`cv2.max` tiap
-frame (bukan ~200 panggilan gambar).
-
-**Tracking tangan.** Tanpa MediaPipe atau model apa pun — `hand_tracking.py`
-threshold frame ke HSV (kulit, atau nanti warna glove per tangan), bersihkan
-mask-nya (morphology open+close), lalu ambil hingga 2 contour terbesar sebagai
-tangan. Posisi telapak = centroid contour (image moments), dinormalisasi 0..1
-sama seperti landmark dulu. Karena tak ada label handedness dari model, tiap
-tangan tetap dilabeli "Left"/"Right" yang sama selama frame-ke-frame dengan
-mencocokkan ke centroid terdekat sebelumnya; tangan baru dilabeli dari posisi
-kiri-ke-kanan di layar. Pipeline: capture di thread sendiri, deteksi HSV
-sinkron tiap frame kamera baru (murah, tak perlu thread/async terpisah), filter
-One-Euro per tangan meredam jitter centroid (blob HSV lebih berisik
-dibanding landmark dulu). Titik debug (abu = mentah, hijau = smoothed) tetap
-ada untuk tuning `LATENCY_COMP`, walau sekarang efeknya kecil karena tak ada
-lagi jeda capture->hasil yang perlu dikompensasi.
-
-**Deteksi kepalan.** Murni geometri contour: solidity = luas contour dibagi
-luas convex hull-nya. Kepalan hampir konveks sempurna (solidity tinggi);
-telapak terbuka punya celah antar-jari yang menurunkan solidity. Di atas
-`FIST_SOLIDITY` (default 0.88) dihitung kepalan. Kepalan = hit; kepalan lalu
-lepas = hold.
-
-**Hit scan.** Telapak diperlakukan sebagai disc ~70 px, bukan titik. Kalau
-menutupi 2–3 zona bersebelahan, semuanya ikut kena — sengaja, supaya toleran.
-
-**Chart parser + maidata loader.** Membaca `maidata.txt` (format simai):
-metadata `&title` / `&artist` / `&first`, dan chart `&inote_2..6` per kesulitan.
-Parser menangani: tap `1`–`8`, touch `A1`–`E8` dan `C1`/`C2`, hold `Nh[div:mult]`,
-marker `x` (EX) / `b` (break), ganti BPM `(185)` dan pembagian ketukan `{8}`
-inline, serta slide — termasuk rantai (`1-7-5-3`), slide V (`2V46`), campur
-bentuk (`6p5>7`), dan fork (`4-8*-2`). Diuji ke 5 kesulitan メズマライザー: chart
-berakhir ~154,4 s vs lagu 157 s (timing pas).
-
-**Game rhythm.** `test.py` sekarang: memuat chart+lagu, memunculkan not sebagai
-lingkaran yang mengecil ke zona, menilai kepalan terhadap not terdekat (window
-PERFECT ±45 ms, GREAT ±90, GOOD ±140, MISS >200), HUD skor/akurasi/combo, dan
-layar hasil saat chart selesai. Posisi chart `1`–`8` dipetakan ke ring `D`,
-touch `A/B/E` ke zona senama.
-
-## Log progres
-
-Dicatat per tanggal, mengikuti commit. Entri terbaru di atas.
-
-<!-- Tiap habis commit, tambahkan baris di bawah tanggalnya:
-     `hash-pendek` — ringkasan singkat apa yang berubah.
-     Kalau tanggalnya baru, buat sub-judul ### tanggal baru di paling atas. -->
-
-### 2026-09-15
-
-- _(belum di-commit)_ — **lepas MediaPipe sepenuhnya**. Tracking tangan sekarang
-  murni HSV + geometri OpenCV: `hand_tracking.py` (baru) threshold HSV ->
-  contour terbesar -> centroid jadi posisi telapak, solidity contour (luas
-  contour / luas convex hull) jadi deteksi kepalan. Deteksi jalan sinkron tiap
-  frame kamera baru (bukan lagi thread + `LIVE_STREAM` async terpisah).
-  Tambah `calibrate_hsv.py` buat nyari rentang HSV yang pas via trackbar live.
-  `hand_landmarker.task` dan import `mediapipe` di `test.py` dihapus. Sudah
-  disiapkan `GLOVE_HSV` di `hand_tracking.py` sebagai placeholder mode glove
-  warna (per-tangan) buat nanti.
-
-### 2026-09-02
-
-- _(belum di-commit)_ — **game rhythm jadi**. Ditambah `maidata.py` (loader
-  simai) dan `rhythm.py` (`NoteManager`: pemetaan zona, penilaian, skor/combo).
-  `chart_parser.py` di-upgrade besar: touch note, marker x/b, `(bpm)` inline,
-  dan parsing slide yang benar (rantai, V, campur bentuk, fork). `music.py` untuk
-  tes sinkronisasi audio. `test.py` disambungkan: not terbang masuk, kepalan
-  dinilai, HUD + layar hasil, `NOTE_SPEED` ala maimai. Kerja tracking latensi:
-  ukur pipeline (~25 deteksi/detik, ~55–75 ms), setel `LATENCY_COMP` /
-  `MAX_EXTRAP_S`, tambah `DECEL_SNAP` anti-overshoot dan titik debug mentah vs
-  prediksi. Pasang `pygame-ce` (pygame biasa gagal build di Python 3.14).
-  Tambah folder `levels/メズマライザー/`.
-- `33325fa` — logika parser tambahan untuk hold.
-- `967b50a` — tambah screenshot hasil program ke `docs/screenshot.png`.
-- `0b77a8d` — mulai pakai README ini sebagai catatan progres.
-- `0f416d5` — fase 2: papan 34 zona (ring B/E/A/D + C1/C2 di tengah), hit scan
-  disc, deteksi kepalan untuk tap, mekanik hold. Termasuk kerja sebelum commit
-  pertama: pindah ke MediaPipe Tasks API (Python 3.14 / MediaPipe 1.x menghapus
-  `mp.solutions`), capture di thread terpisah, deteksi async `LIVE_STREAM`,
-  smoothing One-Euro + ekstrapolasi antar-deteksi.
-
-## Masalah / keterbatasan yang diketahui
-
-- **Tracking HSV rentan pencahayaan/latar.** Mask warna kulit gampang meleset
-  kalau lampu berubah atau ada benda sewarna kulit di latar belakang — kalibrasi
-  ulang tiap sesi lewat `calibrate_hsv.py`. Rencana: pindah ke glove/marker warna
-  solid (`GLOVE_HSV` di `hand_tracking.py` sudah ada placeholder-nya) begitu
-  barangnya ada, karena satu warna solid jauh lebih stabil di-threshold
-  dibanding kulit dan sekalian menyelesaikan handedness secara pasti.
-- **Timing game belum dikalibrasi.** `AUDIO_OFFSET_MS = 0`. Perlu disetel per
-  setup (latensi kamera + audio + reaksi).
-- Hold dan slide dinilai sebagai satu tap di titik/waktu awalnya — belum ada
-  penilaian lepas-hold atau jalur slide.
-- Ring `1`–`8` dipetakan ke wedge luar `D` yang tipis — target kecil. Kalau susah,
-  ganti `RING_TO_ZONE` di `rhythm.py` ke ring `A`.
-- Deteksi kepalan (solidity contour) bisa salah kalau tangan menghadap miring
-  ke kamera atau mask HSV terpotong sebagian (lengan panjang, bayangan, dll).
-- Tanpa handedness dari model, label "Left"/"Right" murni tebakan posisi +
-  kontinuitas — bisa tertukar kalau dua tangan saling menyilang cepat.
-- Geometri papan hard-coded untuk frame 1280×720, berpusat di tengah. Belum ada
-  kalibrasi ke posisi pemain.
-- `test.py` sudah besar dan jalan otomatis saat di-import — perlu dibungkus
-  `if __name__ == "__main__"` sebelum dipecah jadi modul.
-- `__pycache__/` masih ikut ke-track git; perlu `.gitignore`.
-
-## Selanjutnya
-
-- Kalibrasi `AUDIO_OFFSET_MS` + kalibrasi papan ke posisi pemain
-- Penilaian hold (lepas di waktu yang benar) dan slide (susuri jalur)
-- Layar pemilihan lagu / kesulitan, bukan konstanta
-- Isi `GLOVE_HSV` begitu glove/marker warna sudah ada, pindah `TRACK_MODE`
-  ke `"glove"` untuk tracking yang lebih stabil + handedness pasti
-- `.gitignore` + pecah `test.py` jadi modul
+1. Tracking warna gampang terganggu cahaya dan latar. Rentang warna diukur dari satu
+   foto sarung tangan (biru muda H sekitar 93, oranye H sekitar 19, putih V sekitar
+   180). Kalau cahaya berubah, kalibrasi ulang dengan `calibrate_hsv.py`. Benda biru,
+   oranye, atau putih di latar bisa bikin kotak palsu. Syarat "biru dan oranye dalam
+   satu blob" menyaring sebagian besar, tapi tidak semuanya. Kalau tiap sarung
+   tangan hanya satu warna, syarat itu harus diubah.
+2. Timing belum dikalibrasi. `AUDIO_OFFSET_MS` masih 0 dan perlu disetel sesuai
+   kamera, audio, dan reaksi pemain.
+3. Hold dinilai sebagai satu sentuhan di awalnya, belum ada penilaian lepas hold.
+   Slide dinilai sekali di jalur akhir, kotak tidak dicek sepanjang jalur. Bentuk
+   lengkung (`>`, `p`, `s`, dan lainnya) digambar sebagai garis lurus. Slide yang
+   mulai dan berakhir di jalur yang sama tampil sebagai bintang diam.
+4. Tidak ada gerakan menekan, jadi tangan yang diam di atas lingkaran mengenai semua
+   not di tempat itu. Kotak yang besar (tangan terbuka) juga bisa menyentuh beberapa
+   lingkaran sekaligus.
+5. Ukuran papan tertulis tetap untuk frame 1280x720 dan di tengah layar. Belum ada
+   kalibrasi ke posisi pemain.
+6. Folder `__pycache__/` masih ikut di git dan belum ada `.gitignore`.
