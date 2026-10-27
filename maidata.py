@@ -3,8 +3,6 @@ from pathlib import Path
 
 from chart_parser import parse_chart
 
-# simai difficulty slots. maidata files use &inote_2 .. &inote_7 with
-# &lv_2 .. &lv_7 giving the displayed level. 2=Basic ... 6=Re:Master.
 DIFFICULTY_NAMES = {
     1: "Easy", 2: "Basic", 3: "Advanced", 4: "Expert",
     5: "Master", 6: "Re:Master", 7: "Utage",
@@ -12,11 +10,6 @@ DIFFICULTY_NAMES = {
 
 
 def load_maidata(path):
-    """Read a maidata.txt into a dict of its &key=value fields.
-
-    A value runs from after the '=' until the next line that starts with '&'
-    (or EOF), so the multi-line inote_* chart bodies come through intact.
-    """
     text = Path(path).read_text(encoding="utf-8")
     fields = {}
     for m in re.finditer(r"&([a-z0-9_]+)=(.*?)(?=\n&|\Z)", text, re.S):
@@ -25,7 +18,6 @@ def load_maidata(path):
 
 
 def list_charts(fields):
-    """Which difficulties this file actually contains: {slot: (name, level)}."""
     out = {}
     for key in fields:
         m = re.fullmatch(r"inote_(\d)", key)
@@ -37,7 +29,6 @@ def list_charts(fields):
 
 
 def _clean_body(body):
-    """Chart body -> one whitespace-free token stream, trailing 'E' removed."""
     body = re.sub(r"\s+", "", body.strip())
     if body.endswith("E"):
         body = body[:-1]
@@ -45,11 +36,6 @@ def _clean_body(body):
 
 
 def get_events(fields, slot):
-    """Parsed note events for one difficulty slot (e.g. 4 = Expert).
-
-    Times are shifted by &first (seconds of lead-in before the chart's
-    beat 1) so they line up with the audio clock.
-    """
     key = f"inote_{slot}"
     if key not in fields:
         raise KeyError(f"{key} not in this maidata (have: {sorted(fields)})")

@@ -1,10 +1,3 @@
-"""Maimai-style rhythm game played with colored gloves in front of a camera.
-
-Every frame: read the camera -> find the gloves (hand_tracking) -> draw the
-scene (render) -> a note is a PERFECT when a glove box touches its circle
-at the right time (rhythm). Press q to quit.
-"""
-
 import threading
 import time
 from pathlib import Path
@@ -18,19 +11,17 @@ from hand_tracking import GloveTracker
 from maidata import get_events, load_maidata
 from rhythm import NoteManager
 
-# --- settings -----------------------------------------------------------------
-PLAY_CHART = True            # False = just test glove tracking, no song / notes
+PLAY_CHART = True
 LEVEL_NAME = "メズマライザー"
-DIFFICULTY = 5               # 2 Basic 3 Advanced 4 Expert 5 Master 6 Re:Master
-AUDIO_OFFSET_MS = 0          # +ve = notes judged later; tune by ear
-NOTE_SPEED = 5.0             # higher = notes appear later and move faster
-NOTE_LEAD_MS = int(3600 / NOTE_SPEED)   # how long before its time a note shows up
-CAMERA_INDEX = 0             # 0 = the scrcpy v4l2loopback device (/dev/video0)
-RUN_PARSER_TEST = False      # True = only check the chart parser, then exit
+DIFFICULTY = 6
+AUDIO_OFFSET_MS = 0
+NOTE_SPEED = 5.0
+NOTE_LEAD_MS = int(3600 / NOTE_SPEED)
+CAMERA_INDEX = 0
+RUN_PARSER_TEST = False
 
 
 def test_chart_parser():
-    """Parse a sample chart and print its events."""
     events = parse_chart("1,,A1,,{8}1-3[4:1],,C1h[4:1],,,4h[4:1],,1/4>6[8:3],", bpm=120)
     print(f"{len(events)} events parsed:")
     for e in events:
@@ -38,11 +29,7 @@ def test_chart_parser():
 
 
 class CameraStream:
-    """Reads frames on a background thread and keeps only the newest one, so a
-    slow camera read never stalls the drawing loop."""
-
     def __init__(self, index):
-        # CAP_V4L2 is the Linux camera backend (CAP_MSMF only exists on Windows)
         self.cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -70,8 +57,6 @@ class CameraStream:
 
 
 class SongClock:
-    """Plays the track and tells how many milliseconds into it we are."""
-
     def __init__(self, track_path):
         pygame.mixer.init()
         pygame.mixer.music.load(str(track_path))
@@ -80,7 +65,7 @@ class SongClock:
 
     def ms(self):
         pos = pygame.mixer.music.get_pos()
-        if pos < 0:     # get_pos() returns -1 after the track ends; use the wall clock
+        if pos < 0:
             pos = int((time.perf_counter() - self.start) * 1000)
         return pos + AUDIO_OFFSET_MS
 
@@ -117,9 +102,9 @@ def main():
             time.sleep(0.01)
             continue
 
-        if raw is not last_raw:      # only look for gloves on a new camera frame
+        if raw is not last_raw:
             last_raw = raw
-            camera_img = cv2.flip(render.fit_cover(raw), 1)     # mirror, like a mirror
+            camera_img = cv2.flip(render.fit_cover(raw), 1)
             boxes = tracker.update(camera_img)
 
         now = time.perf_counter()

@@ -1,18 +1,11 @@
 import re
 
-# Slide shape tokens. Longer ones (pp, qq) MUST come first in the alternation
-# so "pp" isn't read as "p" + a stray "p".
 SLIDE_SHAPES = ['pp', 'qq', '-', '^', '<', '>', 'v', 'V', 'w', 's', 'z', 'p', 'q']
 SHAPE_ALT = '|'.join(re.escape(s) for s in SLIDE_SHAPES)
 
-# A note: position (ring digit, or touch letter+digit), optional b/x markers
-# (break / EX), optional "h" (hold), optional [divider:multiplier] duration.
 NOTE_PATTERN = re.compile(r'([A-E]?\d)([bx]*)(h)?(?:\[(\d+):(\d+)\])?')
 
-# Is this sub-token a slide? -> starts with a ring digit (+ markers) then a shape.
 SLIDE_HEAD = re.compile(rf'^([1-8])([bx]*)((?:{SHAPE_ALT}).*)$')
-# One segment inside a slide body: a shape, one or more target digits, markers,
-# and maybe the duration bracket (usually only on the final segment).
 SLIDE_SEG = re.compile(rf'({SHAPE_ALT})([1-8]+)([bx]*)(?:\[(\d+):(\d+)\])?')
 
 
@@ -23,26 +16,16 @@ def duration_ms(bpm, divider, multiplier):
 def _slide_length(bpm, div_str, mult_str):
     if div_str and mult_str:
         return duration_ms(bpm, int(div_str), int(mult_str))
-    # Real simai auto-derives an omitted slide duration from chart context.
-    # We don't have that engine, so fall back to a flat one beat.
     return duration_ms(bpm, 4, 1)
 
 
 def parse_slide(sub_token, current_time_ms, bpm):
-    """One slide sub-token -> a list of SLIDE events.
-
-    Handles chains (1-7-5-3), multi-point shapes (2V46), mixed shapes
-    (6p5>7) and forks (4-8*-2, one star / several paths). Each event
-    carries the full waypoint list plus a legacy start/shape/end.
-    """
     head = SLIDE_HEAD.match(sub_token)
     if not head:
         return None
 
     star, markers, body = head.groups()
 
-    # "*" = a fork: several slide paths leaving the same star at the same time.
-    # The duration bracket may sit on any one path but applies to them all.
     paths = []
     length = None
     for path in body.split('*'):
@@ -117,8 +100,6 @@ def parse_chart(chart_str, bpm=120, default_divisor=4):
     for token in chart_str.strip().split(','):
         token = token.strip()
 
-        # Consume any run of (bpm) / {divisor} directives at the front of the
-        # token, e.g. "(185){1}1" or a lone "(120)".
         while token[:1] in ('(', '{'):
             close = ')' if token[0] == '(' else '}'
             end = token.index(close)
@@ -129,7 +110,6 @@ def parse_chart(chart_str, bpm=120, default_divisor=4):
                 divisor = value
             token = token[end + 1:]
 
-        # "/" separates simultaneous notes in one slot (e.g. a tap and a slide).
         for sub_token in token.split('/'):
             events.extend(parse_sub_token(sub_token, current_time_ms, bpm))
 

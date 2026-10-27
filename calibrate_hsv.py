@@ -1,16 +1,3 @@
-"""Find the HSV range of one glove color, using sliders.
-
-Run it once per color (light blue, orange, white):
-
-    python calibrate_hsv.py        # camera 0 (the scrcpy /dev/video0)
-    python calibrate_hsv.py 1      # another camera index
-
-Hold the glove in front of the camera and move the sliders until the right
-picture (the mask) is white on that color of the glove and black everywhere
-else. A few stray dots are fine. Press p to print the range, then paste it into
-BLUE / ORANGE / WHITE at the top of hand_tracking.py. Press q to quit.
-"""
-
 import sys
 
 import cv2
@@ -43,7 +30,7 @@ while True:
     ok, frame = cap.read()
     if not ok:
         continue
-    frame = cv2.flip(frame, 1)                       # same mirror as the game
+    frame = cv2.flip(frame, 1)
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
     low = tuple(cv2.getTrackbarPos(n, WINDOW) for n in ("H min", "S min", "V min"))
@@ -51,7 +38,7 @@ while True:
     mask = cv2.inRange(hsv, np.array(low), np.array(high))
 
     both = np.hstack([frame, cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)])
-    both = cv2.resize(both, None, fx=0.5, fy=0.5)    # shrink so it fits the screen
+    both = cv2.resize(both, None, fx=0.5, fy=0.5)
     cv2.putText(both, f"{low} {high}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     cv2.imshow(WINDOW, both)
 

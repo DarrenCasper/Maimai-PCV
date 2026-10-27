@@ -5,26 +5,22 @@ import pygame
 
 from maidata import get_events, list_charts, load_maidata
 
-# Level folder (simai layout: track.mp3 + maidata.txt + art), resolved
-# relative to this file so cwd doesn't matter.
 LEVEL_DIR = Path(__file__).parent / "levels" / "メズマライザー"
 SONG_PATH = LEVEL_DIR / "track.mp3"
 MAIDATA_PATH = LEVEL_DIR / "maidata.txt"
 
-DIFFICULTY = 4          # 2=Basic 3=Advanced 4=Expert 5=Master 6=Re:Master
-AUDIO_OFFSET_MS = 0     # +ve = treat notes as later; tune by ear later
-LEAD_TIME_MS = 1500     # how long before its hit-time a note "exists" on screen
-MISS_MS = 200           # how far past hit-time before we call it gone
-TEST_SECONDS = 25       # stop the sync test after this; None = play whole song
+DIFFICULTY = 4
+AUDIO_OFFSET_MS = 0
+LEAD_TIME_MS = 1500
+MISS_MS = 200
+TEST_SECONDS = 25
 
 
 def get_delta_ms(note_time_ms, audio_ms, offset_ms=0):
-    """Positive = note still coming. Negative = note's moment has passed."""
     return note_time_ms - (audio_ms + offset_ms)
 
 
 def get_progress(delta_ms, lead_time_ms):
-    """0.0 = note just spawned, 1.0 = due right now (clamped both ends)."""
     return min(1.0, max(0.0, 1 - (delta_ms / lead_time_ms)))
 
 
@@ -40,8 +36,8 @@ pygame.mixer.init()
 pygame.mixer.music.load(str(SONG_PATH))
 pygame.mixer.music.play()
 
-spawn_i = 0   # next note that hasn't entered the lead window yet
-pass_i = 0    # next note that hasn't left the window yet
+spawn_i = 0
+pass_i = 0
 
 while pass_i < len(events):
     audio_ms = pygame.mixer.music.get_pos()
@@ -53,7 +49,6 @@ while pass_i < len(events):
               f"({pass_i}/{len(events)} events consumed)")
         break
 
-    # notes that just came into view
     while spawn_i < len(events):
         d = get_delta_ms(events[spawn_i]["time_ms"], audio_ms, AUDIO_OFFSET_MS)
         if d > LEAD_TIME_MS:
@@ -64,7 +59,6 @@ while pass_i < len(events):
               f"due in {d:+5.0f}ms")
         spawn_i += 1
 
-    # notes whose moment has fully passed
     while pass_i < len(events):
         d = get_delta_ms(events[pass_i]["time_ms"], audio_ms, AUDIO_OFFSET_MS)
         if d > -MISS_MS:

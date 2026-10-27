@@ -1,9 +1,3 @@
-"""Everything drawn on screen, using plain OpenCV drawing calls.
-
-The board outline is drawn once at start-up (BOARD_LINES); each frame only
-copies it onto the scene. Colors are BGR, as everywhere in OpenCV.
-"""
-
 import math
 
 import cv2
@@ -16,20 +10,18 @@ AA = cv2.LINE_AA
 WHITE = (255, 255, 255)
 BOX_COLOR = (90, 255, 120)
 NOTE_COLORS = {
-    "TAP": (180, 105, 255),        # pink
-    "HOLD": (0, 190, 255),         # amber
-    "TOUCH": (120, 230, 90),       # green
+    "TAP": (180, 105, 255),
+    "HOLD": (0, 190, 255),
+    "TOUCH": (120, 230, 90),
     "TOUCH_HOLD": (120, 230, 90),
-    "SLIDE": (255, 170, 40),       # blue
+    "SLIDE": (255, 170, 40),
 }
 TOUCH_KINDS = ("TOUCH", "TOUCH_HOLD")
-START_RADIUS = 14      # a lane note starts this small at the board center
-APPROACH_PX = 100      # a touch note's ring starts this far outside its target
+START_RADIUS = 14
+APPROACH_PX = 100
 
 
-# --- background -----------------------------------------------------------
 def fit_cover(img):
-    """Scale + center-crop an image to exactly FRAME_W x FRAME_H (no stretching)."""
     h, w = img.shape[:2]
     scale = max(FRAME_W / w, FRAME_H / h)
     img = cv2.resize(img, (round(w * scale), round(h * scale)))
@@ -39,22 +31,17 @@ def fit_cover(img):
 
 
 def load_backdrop(path):
-    """The level's artwork, darkened so the board stays readable.
-    Falls back to a plain dark background if the file is missing."""
     if not path.exists():
         return np.full((FRAME_H, FRAME_W, 3), (40, 30, 25), np.uint8)
-    # imdecode instead of imread so non-ASCII folder names (Japanese) work
     art = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
     return cv2.convertScaleAbs(fit_cover(art), alpha=0.3)
 
 
-# --- board (drawn once) -----------------------------------------------------
-R = RING_LAYERS[-1]["r_max"] + 10    # half-size of the square around the board (lane buttons stick out a bit)
+R = RING_LAYERS[-1]["r_max"] + 10
 BOARD_X0, BOARD_Y0 = CENTER[0] - R, CENTER[1] - R
 
 
 def wedge_points(inner, outer, start_deg, end_deg):
-    """Outline of a ring slice: along the outer arc, then back along the inner arc."""
     angles = np.radians(np.linspace(start_deg, end_deg, 12))
 
     def arc(radius):
@@ -72,7 +59,6 @@ def build_board():
             cv2.polylines(lines, [pts], True, WHITE, 2, AA)
     cv2.circle(lines, (R, R), C_RADIUS, WHITE, 2, AA)
     cv2.line(lines, (R, R - C_RADIUS), (R, R + C_RADIUS), WHITE, 2, AA)
-    # the 8 lane buttons on the outer ring, where lane notes land
     for k in range(1, 9):
         x, y = zone_center(f"D{k}")
         cv2.circle(lines, (x - BOARD_X0, y - BOARD_Y0), TARGET_RADIUS, WHITE, 2, AA)
@@ -84,19 +70,16 @@ BOARD_LINES = build_board()
 
 def draw_board(frame):
     roi = frame[BOARD_Y0:BOARD_Y0 + 2 * R, BOARD_X0:BOARD_X0 + 2 * R]
-    cv2.max(roi, BOARD_LINES, roi)      # white outlines on top of the scene
+    cv2.max(roi, BOARD_LINES, roi)
 
 
-# --- notes and gloves ------------------------------------------------------------
 def draw_note(frame, xy, radius, color):
-    """A maimai-style note: a thick colored ring with a white edge on each side."""
     cv2.circle(frame, xy, radius, WHITE, 3, AA)
     cv2.circle(frame, xy, radius - 5, color, 8, AA)
     cv2.circle(frame, xy, radius - 11, WHITE, 2, AA)
 
 
 def draw_star(frame, xy, radius, color):
-    """A 5-point star: points alternate between the outer and a smaller inner radius."""
     points = []
     for i in range(10):
         r = radius if i % 2 == 0 else radius * 0.45
@@ -108,11 +91,10 @@ def draw_star(frame, xy, radius, color):
 
 
 def point_on_path(path, fraction):
-    """The (x, y) point a fraction (0..1) of the way along the lines joining `path`."""
     lengths = [math.dist(a, b) for a, b in zip(path, path[1:])]
     remaining = fraction * sum(lengths)
     for a, b, length in zip(path, path[1:], lengths):
-        if length and remaining <= length:      # skip zero-length segments (loop slides)
+        if length and remaining <= length:
             f = remaining / length
             return (int(a[0] + (b[0] - a[0]) * f), int(a[1] + (b[1] - a[1]) * f))
         remaining -= length
@@ -120,9 +102,6 @@ def point_on_path(path, fraction):
 
 
 def draw_notes(frame, notes):
-    """Lane notes fly from the board center out to their lane button, growing as
-    they go. A slide's star then travels along its path to the end lane. Touch
-    notes stay put: a ring shrinks onto the target circle."""
     for n in notes:
         if n["judged"] is not None:
             continue
@@ -137,7 +116,7 @@ def draw_notes(frame, notes):
         radius = int(START_RADIUS + (TARGET_RADIUS - START_RADIUS) * p)
         if n["path"]:
             cv2.polylines(frame, [np.array(n["path"], np.int32)], False, color, 4, AA)
-        if p < 1:       # still flying out from the center to the first spot
+        if p < 1:
             x = int(CENTER[0] + (first_spot[0] - CENTER[0]) * p)
             y = int(CENTER[1] + (first_spot[1] - CENTER[1]) * p)
             pos = (x, y)
@@ -157,7 +136,6 @@ def draw_boxes(frame, boxes, thickness=3):
 
 
 def draw_preview(frame, camera_img, boxes):
-    """Small live camera picture (bottom-left) so you can see yourself."""
     w, h = 256, 144
     x, y = 20, FRAME_H - h - 20
     small = cv2.resize(camera_img, (w, h))
@@ -167,9 +145,7 @@ def draw_preview(frame, camera_img, boxes):
     cv2.rectangle(frame, (x - 1, y - 1), (x + w, y + h), WHITE, 2)
 
 
-# --- text / HUD ---------------------------------------------------------------
 def put_text(frame, text, x, y, scale=0.8, color=WHITE, align="left"):
-    """Text with a dark outline so it reads on any background."""
     width = cv2.getTextSize(text, FONT, scale, 2)[0][0]
     if align == "right":
         x -= width
@@ -199,7 +175,7 @@ def draw_hud(frame, mgr, song_ms, fps):
 def draw_results(frame, mgr):
     x0, y0, x1, y1 = FRAME_W // 2 - 240, FRAME_H // 2 - 130, FRAME_W // 2 + 240, FRAME_H // 2 + 130
     panel = frame[y0:y1, x0:x1]
-    cv2.addWeighted(panel, 0.3, np.zeros_like(panel), 0.7, 0, panel)    # dark panel
+    cv2.addWeighted(panel, 0.3, np.zeros_like(panel), 0.7, 0, panel)
     lines = [
         "RESULTS",
         f"Perfect {mgr.counts['PERFECT']}   Miss {mgr.counts['MISS']}",
